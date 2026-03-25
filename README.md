@@ -17,7 +17,7 @@ https://github.com/user-attachments/assets/6ba63485-34ba-42b6-b9b1-ff980717c77b
 Our paper is available on arXiv:
 
 **MobileFineTuner: A Unified End-to-End Framework for Fine-Tuning LLMs on Mobile Phones**  
-[Jiaxiang Geng](https://arxiv.org/abs/2512.08211), Lunyu Zhao, Yiyi Lu, Bing Luo
+Jiaxiang Geng*, Lunyu Zhao*, Yiyi Lu*, and Bing Luo
 
 [![arXiv](https://img.shields.io/badge/arXiv-2512.08211-b31b1b.svg)](https://arxiv.org/abs/2512.08211)
 
