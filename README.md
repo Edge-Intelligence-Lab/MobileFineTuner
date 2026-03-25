@@ -5,13 +5,23 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-iOS%20%7C%20Android-green.svg)]()
 [![C++](https://img.shields.io/badge/C%2B%2B-17-orange.svg)]()
-[![Paper](https://arxiv.org/abs/2512.08211)]()
 
 <img width="2250" height="1370" alt="framework" src="https://github.com/user-attachments/assets/b4a6768c-d644-4ec8-8d3c-10d6ada04c3e" />
 
 <img width="1992" height="1112" alt="image" src="https://github.com/user-attachments/assets/35cb5c4e-a3bb-4a21-aac2-d38d50899a17" />
 
 https://github.com/user-attachments/assets/6ba63485-34ba-42b6-b9b1-ff980717c77b
+
+## Paper
+
+Our paper is available on arXiv:
+
+**MobileFineTuner: A Unified End-to-End Framework for Fine-Tuning LLMs on Mobile Phones**  
+[Jiaxiang Geng](https://arxiv.org/abs/2512.08211), Lunyu Zhao, Yiyi Lu, Bing Luo
+
+[![arXiv](https://img.shields.io/badge/arXiv-2512.08211-b31b1b.svg)](https://arxiv.org/abs/2512.08211)
+
+If you find this project useful, please consider citing our paper.
 
 ---
 
