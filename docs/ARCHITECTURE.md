@@ -18,6 +18,7 @@ Graph class        -> GPT-2 / Gemma / Qwen forward and backward math
 SafeTensorsLoader  -> external checkpoint tensors into graph weights
 LoRA modules       -> trainable adapters on named target projections
 Optimizer          -> native C++ parameter update
+Android SDK AAR    -> Java/JNI packaging over AutoModel + AutoTrainer
 ```
 
 ## Design Principles
@@ -177,3 +178,16 @@ With the discovery layer:
 - asset contracts stay consistent across desktop and Android;
 - unsupported model families fail with explicit errors instead of silently using
   the wrong tokenizer.
+
+## Android Packaging Layer
+
+The Android SDK lives under `android-visualizer/mft-sdk` and builds an AAR. It
+adds a Java class, `com.mobilefinetuner.sdk.MobileFineTuner`, plus a small JNI
+bridge. The bridge owns a native `AutoModelForCausalLM` and `AutoTrainer` and
+forwards training requests into the same C++ code path used by desktop and adb
+experiments.
+
+The Android layer deliberately does not own model-specific math, tokenizer
+implementations, optimizers, or dataset policy. Those stay in the C++ core and
+public asset contracts so Android remains a packaging target rather than a fork
+of the framework.

@@ -56,6 +56,7 @@ Unlike simulation-based or desktop-bound approaches, MobileFineTuner is built ar
 
 - [Installation & Build](#installation--build)
 - [Quick Start](#quick-start)
+- [Android SDK / AAR](#android-sdk--aar)
 - [Model and Dataset Assets](#model-and-dataset-assets)
 - [Supported Models](#supported-models)
 - [Core Components](#core-components)
@@ -116,6 +117,19 @@ See [docs/PUBLIC_API.md](docs/PUBLIC_API.md) for the public API boundary.
 
 The legacy package name is still available for existing consumers:
 `find_package(Operators REQUIRED)` and `Operators::operators`.
+
+### Android SDK / AAR
+
+MobileFineTuner also provides an Android Library module for app integration:
+
+```bash
+bash scripts/android/build_mft_sdk_aar.sh
+```
+
+This produces `android-visualizer/mft-sdk/build/outputs/aar/mft-sdk-release.aar`.
+The AAR packages the Java API and native JNI bridge, while model weights and
+datasets remain external runtime assets. See [docs/ANDROID_SDK.md](docs/ANDROID_SDK.md)
+for the Android SDK contract.
 
 ---
 

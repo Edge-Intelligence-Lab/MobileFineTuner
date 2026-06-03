@@ -119,6 +119,19 @@ Output APK:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
+Build the reusable MobileFineTuner Android SDK AAR:
+
+```bash
+cd android-visualizer
+./gradlew :mft-sdk:assembleRelease
+```
+
+Output AAR:
+
+```
+mft-sdk/build/outputs/aar/mft-sdk-release.aar
+```
+
 For a release-signed build, configure `keystore.properties` and run:
 
 ```bash
@@ -194,6 +207,13 @@ Tap **Load Demo** to load 220 synthetic training steps with two mock runs (GPT-2
 
 ```
 android-visualizer/
+├── mft-sdk/                              # Android Library / AAR SDK wrapper
+│   └── src/main/
+│       ├── java/com/mobilefinetuner/sdk/
+│       │   └── MobileFineTuner.java     # Java API over native AutoModel/AutoTrainer
+│       └── cpp/
+│           ├── CMakeLists.txt           # Builds JNI + links MF C++ core
+│           └── mobile_finetuner_jni.cpp # Thin JNI bridge
 ├── app/
 │   └── src/main/java/com/mobilefinetuner/visualizer/
 │       ├── MainActivity.kt               # Entry point and app shell

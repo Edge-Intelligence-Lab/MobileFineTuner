@@ -89,6 +89,8 @@ temp/
 android-visualizer/.gradle/
 android-visualizer/build/
 android-visualizer/app/build/
+android-visualizer/*/build/
+android-visualizer/**/.cxx/
 local.properties
 
 # Local Codex/ARIS installation state

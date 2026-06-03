@@ -62,3 +62,16 @@ update, and zero-grad.
 The current Auto APIs cover the shared causal-LM/LoRA training core. Specialized
 dataset loops, logging, checkpoint schedules, and model-specific diagnostics can
 still use the lower-level graph classes directly.
+
+## Android SDK API
+
+Android applications can consume the AAR built from `android-visualizer/mft-sdk`.
+The Java entrypoint is:
+
+```java
+import com.mobilefinetuner.sdk.MobileFineTuner;
+```
+
+It wraps the same C++ `AutoModelForCausalLM` and `AutoTrainer` objects through
+JNI. The Android SDK is a packaging layer, not a separate implementation. See
+`docs/ANDROID_SDK.md` for build, ABI, asset layout, and Java call-order details.

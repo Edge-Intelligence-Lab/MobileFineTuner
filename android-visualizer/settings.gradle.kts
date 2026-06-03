@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "MobileFineTunerVisualizer"
 include(":app")
+include(":mft-sdk")

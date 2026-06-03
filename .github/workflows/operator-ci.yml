@@ -5,11 +5,7 @@ on:
     paths:
       - ".github/workflows/operator-ci.yml"
       - "operator/**"
-      - "gpt2_small_lora_finetune/**"
-      - "gpt2_medium_lora_finetune/**"
-      - "gemma_3_270m_lora_finetune/**"
-      - "gemma_3_1b_pt_lora_finetune/**"
-      - "qwen_lora_finetune/**"
+      - "examples/**"
       - "scripts/run_training_smoke.sh"
       - "scripts/check_release_tree.sh"
       - "scripts/check_local_assets.sh"
@@ -23,11 +19,7 @@ on:
     paths:
       - ".github/workflows/operator-ci.yml"
       - "operator/**"
-      - "gpt2_small_lora_finetune/**"
-      - "gpt2_medium_lora_finetune/**"
-      - "gemma_3_270m_lora_finetune/**"
-      - "gemma_3_1b_pt_lora_finetune/**"
-      - "qwen_lora_finetune/**"
+      - "examples/**"
       - "scripts/run_training_smoke.sh"
       - "scripts/check_release_tree.sh"
       - "scripts/check_local_assets.sh"
@@ -49,6 +41,18 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+
+      - name: Install Android SDK components
+        run: |
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="sdkmanager"
+          fi
+          yes | "$SDKMANAGER" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "cmake;3.22.1" \
+            "ndk;26.1.10909125"
 
       - name: Release tree audit
         run: bash scripts/check_release_tree.sh
@@ -99,19 +103,22 @@ jobs:
           #include "finetune_ops/core/utils.h"
           #include "finetune_ops/data/mmlu_dataset.h"
           #include "finetune_ops/data/wikitext2_dataset.h"
+          #include "finetune_ops/graph/auto_model.h"
           #include "finetune_ops/graph/gemma_lora_injector.h"
           #include "finetune_ops/graph/gemma_model.h"
           #include "finetune_ops/graph/gpt2_model.h"
           #include "finetune_ops/graph/lora_injector.h"
           #include "finetune_ops/graph/lora_saver.h"
+          #include "finetune_ops/graph/model_registry.h"
           #include "finetune_ops/graph/qwen_model.h"
           #include "finetune_ops/graph/safetensors_loader.h"
-          #include "finetune_ops/nn/embedding.h"
           #include "finetune_ops/nn/lora_linear.h"
           #include "finetune_ops/optim/adam.h"
+          #include "finetune_ops/optim/auto_trainer.h"
           #include "finetune_ops/optim/gemma_trainer.h"
           #include "finetune_ops/optim/optimizer.h"
           #include "finetune_ops/optim/trainer.h"
+          #include "mobile_finetuner/mobile_finetuner.h"
           int main() { return 0; }
           EOF
           cmake -S /tmp/operators-consumer -B /tmp/operators-consumer/build -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/operator/install"
@@ -139,7 +146,7 @@ jobs:
       - name: Android visualizer build
         run: |
           cd android-visualizer
-          ./gradlew :app:assembleDebug
+          ./gradlew :mft-sdk:assembleRelease :app:assembleDebug
 
       - name: Five-model smoke
         run: bash scripts/run_training_smoke.sh
