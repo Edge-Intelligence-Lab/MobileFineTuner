@@ -129,7 +129,7 @@ TensorPtr flatten(const TensorPtr& tensor, int start_dim = 0, int end_dim = -1);
 TensorPtr squeeze(const TensorPtr& tensor, int dim = -1);
 TensorPtr unsqueeze(const TensorPtr& tensor, int dim);
 
-// TODO: 以下函数声明但未实现，如需使用请补充实现
+// Advanced indexing helpers are intentionally not part of the stable API yet.
 // TensorPtr index_select(const TensorPtr& tensor, int dim, const TensorPtr& index);
 // TensorPtr masked_select(const TensorPtr& tensor, const TensorPtr& mask);
 // TensorPtr where(const TensorPtr& condition, const TensorPtr& x, const TensorPtr& y);
@@ -138,10 +138,9 @@ TensorPtr unsqueeze(const TensorPtr& tensor, int dim);
 
 TensorPtr sum(const TensorPtr& tensor, int dim = -1, bool keepdim = false);
 TensorPtr mean(const TensorPtr& tensor, int dim = -1, bool keepdim = false);
-// TODO: 以下函数声明但未实现，如需使用请补充实现
+// Reduction indices are intentionally not part of the stable API yet.
 // TensorPtr max(const TensorPtr& tensor, int dim = -1, bool keepdim = false);
 // TensorPtr min(const TensorPtr& tensor, int dim = -1, bool keepdim = false);
-// TODO: 以下函数声明但未实现，如需使用请补充实现
 // TensorPtr argmax(const TensorPtr& tensor, int dim = -1, bool keepdim = false);
 // TensorPtr argmin(const TensorPtr& tensor, int dim = -1, bool keepdim = false);
 
@@ -153,7 +152,8 @@ TensorPtr ge(const TensorPtr& a, const TensorPtr& b);
 TensorPtr le(const TensorPtr& a, const TensorPtr& b);
 
 TensorPtr dropout(const TensorPtr& tensor, float p = 0.5f, bool training = true);
-// TODO: normal is not implemented; use randn instead
+// Use randn for normal initialization; a separate normal(mean, std) helper is
+// intentionally not exposed until its gradient and dtype behavior are specified.
 // TensorPtr normal(const std::vector<int64_t>& shape, float mean = 0.0f, float std = 1.0f,
 //                  DType dtype = kFloat32, Device device = kCPU);
 TensorPtr uniform(const std::vector<int64_t>& shape, float low = 0.0f, float high = 1.0f,
@@ -182,7 +182,7 @@ bool same_shape(const TensorPtr& a, const TensorPtr& b);
 bool broadcastable(const TensorPtr& a, const TensorPtr& b);
 std::vector<int64_t> broadcast_shape(const TensorPtr& a, const TensorPtr& b);
 
-// TODO: to_float/to_int are not implemented; use cast instead
+// Use cast/to_fp32/to_fp16; integer cast convenience wrappers are not exposed.
 // TensorPtr to_float(const TensorPtr& tensor);
 // TensorPtr to_int(const TensorPtr& tensor);
 

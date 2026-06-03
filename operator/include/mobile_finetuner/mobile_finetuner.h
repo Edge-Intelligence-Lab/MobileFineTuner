@@ -11,8 +11,7 @@
 #include "finetune_ops/core/memory_efficient_attention.h"
 #include "finetune_ops/core/ops.h"
 #include "finetune_ops/core/tensor.h"
-#include "finetune_ops/core/tokenizer_bpe.h"
-#include "finetune_ops/core/tokenizer_gemma.h"
+#include "finetune_ops/core/tokenizer.h"
 
 #include "finetune_ops/data/mmlu_dataset.h"
 #include "finetune_ops/data/wikitext2_dataset.h"
@@ -22,6 +21,7 @@
 #include "finetune_ops/graph/gpt2_model.h"
 #include "finetune_ops/graph/lora_injector.h"
 #include "finetune_ops/graph/lora_saver.h"
+#include "finetune_ops/graph/model_registry.h"
 #include "finetune_ops/graph/qwen_model.h"
 #include "finetune_ops/graph/safetensors_loader.h"
 

@@ -20,11 +20,11 @@ report() {
 missing=0
 report "WikiText-2" mf_resolve_wikitext_dir "$ROOT" || missing=1
 report "MMLU" mf_resolve_mmlu_dir "$ROOT" || missing=1
-report "GPT-2 Small" mf_resolve_model_dir gpt2_small "$ROOT/gpt2_small_lora_finetune/pretrained" || missing=1
-report "GPT-2 Medium" mf_resolve_model_dir gpt2_medium "$ROOT/gpt2_medium_lora_finetune/pretrained" || missing=1
-report "Gemma 270M" mf_resolve_model_dir gemma_270m "$ROOT/gemma_3_270m_lora_finetune/pretrained" || missing=1
-report "Gemma 1B-PT" mf_resolve_model_dir gemma_1b_pt "$ROOT/gemma_3_1b_pt_lora_finetune/pretrained" || missing=1
-report "Qwen2.5-0.5B" mf_resolve_model_dir qwen "$ROOT/qwen_lora_finetune/pretrained" || missing=1
+report "GPT-2 Small" mf_resolve_model_dir gpt2_small "$ROOT/examples/gpt2_small_lora_finetune/pretrained" || missing=1
+report "GPT-2 Medium" mf_resolve_model_dir gpt2_medium "$ROOT/examples/gpt2_medium_lora_finetune/pretrained" || missing=1
+report "Gemma 270M" mf_resolve_model_dir gemma_270m "$ROOT/examples/gemma_3_270m_lora_finetune/pretrained" || missing=1
+report "Gemma 1B-PT" mf_resolve_model_dir gemma_1b_pt "$ROOT/examples/gemma_3_1b_pt_lora_finetune/pretrained" || missing=1
+report "Qwen2.5-0.5B" mf_resolve_model_dir qwen "$ROOT/examples/qwen_lora_finetune/pretrained" || missing=1
 
 if [ "$missing" -ne 0 ]; then
   cat <<EOF

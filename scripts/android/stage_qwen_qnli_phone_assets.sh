@@ -10,7 +10,7 @@ QNLI_JSONL_DIR="${QNLI_JSONL_DIR:-$ROOT/data/qnli/qwen_qnli_s64}"
 PUSH_MODEL="${PUSH_MODEL:-0}"
 MODEL_DIR=""
 if [ "$PUSH_MODEL" = "1" ]; then
-  MODEL_DIR="${QWEN_MODEL_DIR:-$(mf_resolve_model_dir qwen "$ROOT/qwen_lora_finetune/pretrained")}"
+  MODEL_DIR="${QWEN_MODEL_DIR:-$(mf_resolve_model_dir qwen "$ROOT/examples/qwen_lora_finetune/pretrained")}"
 fi
 
 ADB_BIN="$(mf_android_resolve_adb)"

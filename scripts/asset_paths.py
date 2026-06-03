@@ -7,7 +7,11 @@ from typing import Sequence
 
 
 def repo_root_from(anchor_file: str) -> Path:
-    return Path(anchor_file).resolve().parent.parent
+    anchor = Path(anchor_file).resolve()
+    for candidate in [anchor.parent, *anchor.parents]:
+        if (candidate / "operator/CMakeLists.txt").is_file() and (candidate / "scripts").is_dir():
+            return candidate
+    return anchor.parent.parent
 
 
 def _env_path(*names: str) -> Path | None:

@@ -24,7 +24,6 @@ option(BUILD_TESTS "Build test targets" ON)
 option(BUILD_EXAMPLES "Build example targets" OFF)
 option(ENABLE_PROFILING "Enable profiling" OFF)
 option(ENABLE_GPT2_DEBUG_PRINT "Enable GPT-2 forward debug print" OFF)
-option(BUILD_LEGACY_CLI "Build legacy top-level CLIs (eval_mmlu/eval_ppl)" OFF)
 option(OPERATORS_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 # ============================================================================
@@ -108,6 +107,7 @@ set(FINETUNE_SOURCES
     finetune_ops/core/lm_loss.cpp
     finetune_ops/core/memory_efficient_attention.cpp
     finetune_ops/core/performance_monitor.cpp
+    finetune_ops/core/tokenizer.cpp
     
     # GPT-2 finetuning core files
     finetune_ops/core/tokenizer_bpe.cpp
@@ -117,6 +117,7 @@ set(FINETUNE_SOURCES
     finetune_ops/graph/safetensors_loader.cpp
     finetune_ops/graph/gpt2_model.cpp
     finetune_ops/graph/lora_injector.cpp
+    finetune_ops/graph/model_registry.cpp
     # Qwen model and MMLU dataset
     finetune_ops/graph/qwen_model.cpp
     finetune_ops/data/mmlu_dataset.cpp
@@ -225,6 +226,7 @@ install(DIRECTORY
     ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/nn
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/finetune_ops
     FILES_MATCHING
+        PATTERN "testdata" EXCLUDE
         PATTERN "*.h"
         PATTERN "*.hpp"
 )
@@ -403,6 +405,14 @@ if(BUILD_TESTS)
         add_test(NAME LoRARoundTrip COMMAND test_lora_roundtrip)
     endif()
 
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/graph/test_model_registry.cpp)
+        add_executable(test_model_registry
+            finetune_ops/graph/test_model_registry.cpp
+        )
+        target_link_libraries(test_model_registry operators)
+        add_test(NAME ModelRegistry COMMAND test_model_registry)
+    endif()
+
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/test_gpt2_lora_two_step_smoke.cpp)
         add_executable(test_gpt2_lora_two_step_smoke
             finetune_ops/optim/test_gpt2_lora_two_step_smoke.cpp
@@ -467,6 +477,25 @@ if(BUILD_TESTS)
         add_test(NAME SelectedTokenLMLoss COMMAND test_selected_token_lm_loss)
     endif()
 
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/core/test_tokenizer_factory.cpp)
+        add_executable(test_tokenizer_factory
+            finetune_ops/core/test_tokenizer_factory.cpp
+        )
+        target_link_libraries(test_tokenizer_factory operators)
+        add_test(NAME TokenizerFactory COMMAND test_tokenizer_factory)
+    endif()
+
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/core/test_tokenizer_hf_golden.cpp)
+        add_executable(test_tokenizer_hf_golden
+            finetune_ops/core/test_tokenizer_hf_golden.cpp
+        )
+        target_link_libraries(test_tokenizer_hf_golden operators)
+        add_test(NAME TokenizerHFGolden COMMAND test_tokenizer_hf_golden)
+        set_tests_properties(TokenizerHFGolden PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..
+        )
+    endif()
+
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/data/test_jsonl_mask_alignment.cpp)
         add_executable(test_jsonl_mask_alignment
             finetune_ops/data/test_jsonl_mask_alignment.cpp
@@ -506,62 +535,6 @@ if(BUILD_TESTS)
     endif()
     
     message(STATUS "✅ Test targets enabled")
-endif()
-
-if(BUILD_LEGACY_CLI)
-    # ============================================================================
-    # Main program: gpt2_lora_finetune
-    # ============================================================================
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../gpt2_lora_finetune/main.cpp)
-        add_executable(gpt2_lora_finetune
-            ../gpt2_lora_finetune/main.cpp
-        )
-        target_link_libraries(gpt2_lora_finetune operators)
-    endif()
-
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/train_lora_gemma.cpp)
-        add_executable(train_lora_gemma
-            finetune_ops/optim/train_lora_gemma.cpp
-        )
-        target_link_libraries(train_lora_gemma operators)
-    endif()
-
-    # MMLU eval
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../gpt2_lora_finetune/eval_mmlu.cpp)
-        add_executable(eval_mmlu
-            ../gpt2_lora_finetune/eval_mmlu.cpp
-            ../gpt2_lora_finetune/mmlu/mmlu_runner.cpp
-        )
-        target_include_directories(eval_mmlu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../gpt2_lora_finetune)
-        target_link_libraries(eval_mmlu operators)
-    endif()
-
-    # WikiText-2 PPL eval
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../gpt2_lora_finetune/eval_ppl.cpp)
-        add_executable(eval_ppl
-            ../gpt2_lora_finetune/eval_ppl.cpp
-        )
-        target_include_directories(eval_ppl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../gpt2_lora_finetune)
-        target_link_libraries(eval_ppl operators)
-    endif()
-
-    # Quick PPL eval
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../gpt2_lora_finetune/quick_eval_ppl.cpp)
-        add_executable(quick_eval_ppl
-            ../gpt2_lora_finetune/quick_eval_ppl.cpp
-        )
-        target_include_directories(quick_eval_ppl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../gpt2_lora_finetune)
-        target_link_libraries(quick_eval_ppl operators)
-    endif()
-
-    # Quick PPL eval with LoRA support
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../gpt2_lora_finetune/quick_eval_lora.cpp)
-        add_executable(quick_eval_lora
-            ../gpt2_lora_finetune/quick_eval_lora.cpp
-        )
-        target_include_directories(quick_eval_lora PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../gpt2_lora_finetune)
-        target_link_libraries(quick_eval_lora operators)
-    endif()
 endif()
 
 # ============================================================================

@@ -1,5 +1,6 @@
 .agents/ export-ignore
 .aris/ export-ignore
+AGENTS.md export-ignore
 Rubbish/ export-ignore
 .venv*/ export-ignore
 review-stage/ export-ignore

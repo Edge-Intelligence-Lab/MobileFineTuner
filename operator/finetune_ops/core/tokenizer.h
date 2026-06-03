@@ -16,6 +16,18 @@ struct hash_pair {
     }
 };
 
+struct EncodedInput {
+    std::vector<int> input_ids;
+    std::vector<int> attention_mask;
+};
+
+struct TokenizerSpecialTokens {
+    int bos_token_id = -1;
+    int eos_token_id = -1;
+    int pad_token_id = -1;
+    int unk_token_id = -1;
+};
+
 class Tokenizer {
 public:
     Tokenizer() = default;
@@ -31,6 +43,12 @@ public:
     virtual int get_bos_token() const = 0;
     virtual int get_pad_token() const = 0;
     virtual int get_unk_token() const = 0;
+
+    EncodedInput encode_with_attention(const std::string& text,
+                                       int max_length = 0,
+                                       bool truncation = true);
+
+    TokenizerSpecialTokens special_tokens() const;
 };
 
 class GPT2Tokenizer : public Tokenizer {
@@ -86,6 +104,20 @@ public:
     int get_bos_token() const override { return 50256; }
     int get_pad_token() const override { return 50256; }
     int get_unk_token() const override { return 50256; }
+};
+
+struct TokenizerLoadOptions {
+    // Empty means infer from config.json and tokenizer assets.
+    std::string model_type;
+};
+
+class TokenizerFactory {
+public:
+    static std::unique_ptr<Tokenizer> from_pretrained(
+        const std::string& model_dir,
+        const TokenizerLoadOptions& options = TokenizerLoadOptions());
+
+    static std::string infer_model_type(const std::string& model_dir);
 };
 
 }

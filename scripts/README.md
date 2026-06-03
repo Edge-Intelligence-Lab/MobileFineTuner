@@ -1,8 +1,7 @@
 # Scripts Directory
 
 This directory keeps the maintained helper scripts that match the current
-repository layout and entrypoints. Historical benchmark and experiment scripts
-are archived under `Rubbish/`; the scripts documented here are the stable
+repository layout and entrypoints. The scripts documented here are the stable
 interfaces expected by CI and release checks.
 
 ## Directory Structure
@@ -12,6 +11,7 @@ scripts/
 ├── asset_paths.py
 ├── check_local_assets.sh
 ├── check_release_tree.sh
+├── generate_tokenizer_hf_golden_fixtures.py
 ├── android/
 │   ├── adb_resource_monitor.sh
 │   ├── android_env.sh
@@ -22,6 +22,9 @@ scripts/
 ├── lib/
 │   └── asset_paths.sh
 ├── plot_loss_curve.py
+├── prepare_arcc_jsonl.py
+├── prepare_mcq_jsonl.py
+├── prepare_qnli_jsonl.py
 ├── pretokenize_wikitext2_gemma.py
 ├── run_training_real_assets.sh
 └── run_training_smoke.sh
@@ -76,6 +79,28 @@ Environment overrides:
 - `SEQ_LEN` to control the short sanity-check sequence length
 - `MFT_MODEL_ROOT` and `MFT_DATA_ROOT` to provide external assets
 
+### `generate_tokenizer_hf_golden_fixtures.py`
+
+Generates HuggingFace tokenizer standard-answer JSONL fixtures for strict C++
+tokenizer alignment checks. It only needs tokenizer/config assets, not model
+weights.
+
+```bash
+export MFT_MODEL_ROOT=/path/to/mft-models
+python3 scripts/generate_tokenizer_hf_golden_fixtures.py \
+  --output runs/tokenizer_golden/hf_tokenizer_golden.jsonl
+```
+
+Run the matching CTest target with:
+
+```bash
+MFT_TOKENIZER_GOLDEN_JSONL=runs/tokenizer_golden/hf_tokenizer_golden.jsonl \
+ctest --test-dir operator/build --output-on-failure -R TokenizerHFGolden
+```
+
+Without `MFT_TOKENIZER_GOLDEN_JSONL`, the C++ test reports a skip and does not
+require local model assets.
+
 ### Android Native MF Helpers
 
 The maintained Android helpers build and run the native MF Qwen/QNLI path:
@@ -103,6 +128,17 @@ python3 scripts/pretokenize_wikitext2_gemma.py
 Outputs:
 - `data/wikitext2/pretokenized_gemma/wt2_gemma_tokens.bin`
 - `data/wikitext2/pretokenized_gemma/meta.json`
+
+### Dataset Preparation Scripts
+
+The dataset converters produce local JSONL artifacts under ignored output
+directories. They do not download or bundle benchmark data into the source tree.
+
+```bash
+python3 scripts/prepare_qnli_jsonl.py --help
+python3 scripts/prepare_mcq_jsonl.py --help
+python3 scripts/prepare_arcc_jsonl.py --help
+```
 
 ### `plot_loss_curve.py`
 

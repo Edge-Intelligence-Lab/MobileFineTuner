@@ -14,11 +14,34 @@ target_link_libraries(your_target PRIVATE MobileFineTuner::operators)
 ```
 
 The `finetune_ops/*` headers are still installed because the current examples
-and research CLIs use them directly, but new applications should include the
-umbrella header first. Historical or non-buildable APIs have been archived under
-`Rubbish/` and are not part of the supported product surface.
+use them directly, but new applications should include the umbrella header
+first. Historical or non-buildable APIs are excluded from the supported product
+surface.
 
 Model weights and datasets are external assets. The library accepts standard
 HuggingFace-style model directories with config/tokenizer files and either a
 single `model.safetensors` file or `model.safetensors.index.json` plus all
 referenced shard files. See `docs/MODEL_ASSETS.md` for the asset contract.
+
+## Stable Discovery APIs
+
+Applications should discover model and tokenizer assets through the public
+registry APIs instead of hard-coding per-model training directories.
+
+```cpp
+#include "mobile_finetuner/mobile_finetuner.h"
+
+auto spec = ops::ModelRegistry::inspect_pretrained(model_dir);
+auto tokenizer = ops::TokenizerFactory::from_pretrained(model_dir);
+```
+
+`ModelRegistry` is the C++ equivalent of a small `AutoConfig` layer: it reads
+`config.json`, identifies the supported model family, records tokenizer and
+SafeTensors asset paths, and exposes default LoRA target names. `TokenizerFactory`
+is the matching `AutoTokenizer` layer: it keeps GPT-2, Qwen, and Gemma tokenizers
+behind one `ops::Tokenizer` interface while still using the model-specific
+tokenization algorithm required by each checkpoint.
+
+This is a discovery layer, not a full `AutoModel` or model-agnostic trainer.
+Current training code still constructs the concrete graph class selected by
+`ModelRegistry::family`.

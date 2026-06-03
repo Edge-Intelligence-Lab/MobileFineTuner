@@ -250,8 +250,6 @@ void GPT2BPETokenizer::load() {
     load_vocab();
     load_merges();
     load_special_tokens();
-    std::cout << "[GPT2BPETokenizer] Loaded: vocab_size=" << vocab_size_ 
-              << ", merges=" << bpe_ranks_.size() << std::endl;
 }
 
 // ============================================================================
@@ -364,13 +362,15 @@ std::string GPT2BPETokenizer::unicode_to_bytes(const std::string& unicode_text) 
 
 void GPT2BPETokenizer::load_vocab() {
     auto parsed = simple_json::parse_vocab_json(config_.vocab_path);
+    int max_id = -1;
     
     for (auto& [token, id] : parsed) {
         vocab_[token] = id;
         id_to_token_[id] = token;
+        max_id = std::max(max_id, id);
     }
     
-    vocab_size_ = vocab_.size();
+    vocab_size_ = max_id >= 0 ? max_id + 1 : 0;
 }
 
 void GPT2BPETokenizer::load_merges() {
@@ -418,7 +418,7 @@ std::vector<std::string> GPT2BPETokenizer::split_to_words(const std::string& tex
         R"('s|'t|'re|'ve|'m|'ll|'d|)"
         R"( ?[a-zA-Z]+|)"
         R"( ?[0-9]+|)"
-        R"( ?[^\s\w]+|)"
+        R"( ?[^\sA-Za-z0-9]+|)"
         R"(\s+(?!\S)|\s+)"
     );
     
@@ -511,15 +511,13 @@ std::vector<int> GPT2BPETokenizer::encode(const std::string& text,
                                           bool truncation) {
     std::vector<int> ids;
     
-    // 1. bytes → unicode mapping
-    std::string unicode_text = bytes_to_unicode(text);
-    
-    // 2. Pre-tokenize
-    auto words = split_to_words(unicode_text);
+    // GPT-2 pre-tokenizes raw text first, then applies bytes→unicode per token.
+    auto words = split_to_words(text);
     
     // 3. Apply BPE to each word
-    for (const auto& word : words) {
-        auto bpe_tokens = bpe(word);
+    for (const auto& word_raw : words) {
+        auto unicode_word = bytes_to_unicode(word_raw);
+        auto bpe_tokens = bpe(unicode_word);
         
         for (const auto& bpe_token : bpe_tokens) {
             auto it = vocab_.find(bpe_token);
@@ -802,9 +800,6 @@ void QwenBPETokenizer::load() {
     load_merges();
     load_added_tokens();
     load_vocab_size_override();
-    std::cout << "[QwenBPETokenizer] Loaded: vocab_size=" << vocab_size_
-              << ", merges=" << bpe_ranks_.size()
-              << ", added_tokens=" << added_tokens_.size() << std::endl;
 }
 
 std::pair<int, int> QwenBPETokenizer::get_best_pair(const std::vector<std::string>& word) {
@@ -895,20 +890,158 @@ std::vector<QwenBPETokenizer::Segment> QwenBPETokenizer::split_by_added_tokens(c
 }
 
 std::vector<std::string> QwenBPETokenizer::split_to_words(const std::string& text) {
-    // Same pre-tokenization regex as GPT-2 (ASCII approximation)
-    std::regex pattern(
-        R"('s|'t|'re|'ve|'m|'ll|'d|)"
-        R"( ?[a-zA-Z]+|)"
-        R"( ?[0-9]+|)"
-        R"( ?[^\s\w]+|)"
-        R"(\s+(?!\S)|\s+)"
-    );
     std::vector<std::string> words;
-    auto words_begin = std::sregex_iterator(text.begin(), text.end(), pattern);
-    auto words_end = std::sregex_iterator();
-    for (auto it = words_begin; it != words_end; ++it) {
-        std::string match = it->str();
-        if (!match.empty()) words.push_back(match);
+
+    auto is_punct_like = [](uint32_t cp) {
+        return !is_whitespace_cp(cp) && !is_letter_cp(cp) && !is_number_cp(cp);
+    };
+
+    auto contraction_len = [&](size_t pos) -> size_t {
+        if (pos >= text.size() || text[pos] != '\'') {
+            return 0;
+        }
+        std::string tail;
+        for (size_t i = pos; i < text.size() && i < pos + 4; ++i) {
+            tail.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(text[i]))));
+        }
+        const std::vector<std::string> contractions = {"'s", "'t", "'re", "'ve", "'m", "'ll", "'d"};
+        for (const auto& suffix : contractions) {
+            if (tail.rfind(suffix, 0) == 0) {
+                return suffix.size();
+            }
+        }
+        return 0;
+    };
+
+    auto consume_letters = [&](size_t pos) {
+        size_t cur = pos;
+        while (cur < text.size()) {
+            auto ch = decode_utf8(text, cur);
+            if (!is_letter_cp(ch.cp)) {
+                break;
+            }
+            cur += ch.len;
+        }
+        return cur;
+    };
+
+    auto next_char_is_letter = [&](size_t pos) {
+        if (pos >= text.size()) {
+            return false;
+        }
+        auto ch = decode_utf8(text, pos);
+        return is_letter_cp(ch.cp);
+    };
+
+    size_t i = 0;
+    while (i < text.size()) {
+        const size_t start = i;
+
+        if (size_t len = contraction_len(i); len > 0) {
+            words.push_back(text.substr(i, len));
+            i += len;
+            continue;
+        }
+
+        auto ch = decode_utf8(text, i);
+
+        // [^\r\n\p{L}\p{N}]?\p{L}+
+        if (is_letter_cp(ch.cp)) {
+            i = consume_letters(i);
+            words.push_back(text.substr(start, i - start));
+            continue;
+        }
+        if (!is_newline_cp(ch.cp) && !is_letter_cp(ch.cp) && !is_number_cp(ch.cp)) {
+            size_t after_prefix = i + ch.len;
+            if (next_char_is_letter(after_prefix)) {
+                i = consume_letters(after_prefix);
+                words.push_back(text.substr(start, i - start));
+                continue;
+            }
+        }
+
+        // \p{N}
+        if (is_number_cp(ch.cp)) {
+            words.push_back(text.substr(i, ch.len));
+            i += ch.len;
+            continue;
+        }
+
+        //  ?[^\s\p{L}\p{N}]+[\r\n]*
+        size_t punct_start = i;
+        if (ch.cp == ' ') {
+            size_t after_space = i + ch.len;
+            if (after_space < text.size()) {
+                auto next = decode_utf8(text, after_space);
+                if (is_punct_like(next.cp)) {
+                    i = after_space;
+                    ch = next;
+                }
+            }
+        }
+        if (i < text.size() && is_punct_like(ch.cp)) {
+            i += ch.len;
+            while (i < text.size()) {
+                auto next = decode_utf8(text, i);
+                if (!is_punct_like(next.cp)) {
+                    break;
+                }
+                i += next.len;
+            }
+            while (i < text.size()) {
+                auto next = decode_utf8(text, i);
+                if (!is_newline_cp(next.cp)) {
+                    break;
+                }
+                i += next.len;
+            }
+            words.push_back(text.substr(punct_start, i - punct_start));
+            continue;
+        }
+
+        // \s*[\r\n]+
+        if (is_whitespace_cp(ch.cp)) {
+            size_t cur = i;
+            bool saw_newline = false;
+            while (cur < text.size()) {
+                auto next = decode_utf8(text, cur);
+                if (!is_whitespace_cp(next.cp)) {
+                    break;
+                }
+                saw_newline = saw_newline || is_newline_cp(next.cp);
+                cur += next.len;
+                if (saw_newline) {
+                    while (cur < text.size()) {
+                        auto nl = decode_utf8(text, cur);
+                        if (!is_newline_cp(nl.cp)) {
+                            break;
+                        }
+                        cur += nl.len;
+                    }
+                    break;
+                }
+            }
+            if (saw_newline) {
+                words.push_back(text.substr(i, cur - i));
+                i = cur;
+                continue;
+            }
+
+            // \s+(?!\S)|\s+
+            i += ch.len;
+            while (i < text.size()) {
+                auto next = decode_utf8(text, i);
+                if (!is_whitespace_cp(next.cp)) {
+                    break;
+                }
+                i += next.len;
+            }
+            words.push_back(text.substr(start, i - start));
+            continue;
+        }
+
+        words.push_back(text.substr(i, ch.len));
+        i += ch.len;
     }
     return words;
 }

@@ -59,6 +59,7 @@ Unlike simulation-based or desktop-bound approaches, MobileFineTuner is built ar
 - [Model and Dataset Assets](#model-and-dataset-assets)
 - [Supported Models](#supported-models)
 - [Core Components](#core-components)
+- [Architecture](#architecture)
 - [Evaluation](#evaluation)
 - [Benchmarks](#benchmarks)
 - [Project Structure](#project-structure)
@@ -90,7 +91,12 @@ cmake --install operator/build --prefix /tmp/mobilefinetuner-install
 - `liboperators.a` - Core framework library
 - self-contained operator tests such as `test_qkt_softmax_grad`, `test_repeat_kv_softmax_grad`, `test_lora_roundtrip`
 
-The default `operator/` build produces the reusable library and unit tests. Model-specific training/eval CLIs are built from the corresponding top-level model directories, such as `gpt2_small_lora_finetune/`, `gpt2_medium_lora_finetune/`, `gemma_3_270m_lora_finetune/`, `gemma_3_1b_pt_lora_finetune/`, and `qwen_lora_finetune/`.
+The default `operator/` build produces the reusable library and unit tests.
+Model-specific training/eval CLIs are examples, built from directories under
+`examples/`, such as `examples/gpt2_small_lora_finetune/`,
+`examples/gpt2_medium_lora_finetune/`, `examples/gemma_3_270m_lora_finetune/`,
+`examples/gemma_3_1b_pt_lora_finetune/`, and
+`examples/qwen_lora_finetune/`.
 
 The install step exports CMake packages. New downstream projects should use the
 `MobileFineTuner` package name:
@@ -174,41 +180,53 @@ To run a one-step real-asset sanity pass across the five training entrypoints:
 bash scripts/run_training_real_assets.sh
 ```
 
+To verify that C++ tokenization matches HuggingFace token IDs for local
+tokenizer snapshots:
+
+```bash
+python3 scripts/generate_tokenizer_hf_golden_fixtures.py
+MFT_TOKENIZER_GOLDEN_JSONL=runs/tokenizer_golden/hf_tokenizer_golden.jsonl \
+  ctest --test-dir operator/build --output-on-failure -R TokenizerHFGolden
+```
+
+See [docs/MODEL_ASSETS.md](docs/MODEL_ASSETS.md) for the tokenizer alignment
+asset contract.
+
 ### 3. Run LoRA Fine-Tuning
 
 #### WikiText-2 LoRA
 - **GPT-2 Small (124M):**
   ```bash
   (
-    cd gpt2_small_lora_finetune &&
+    cd examples/gpt2_small_lora_finetune &&
     TRAIN_MODE=wt2 STEPS=200 BATCH_SIZE=4 GRAD_ACCUM_STEPS=2 ./run_train.sh
   )
   ```
 - **GPT-2 Medium (355M):**
   ```bash
   (
-    cd gpt2_medium_lora_finetune &&
+    cd examples/gpt2_medium_lora_finetune &&
     TRAIN_MODE=wt2 STEPS=200 BATCH_SIZE=2 GRAD_ACCUM_STEPS=2 ./run_train.sh
   )
   ```
 - **Gemma 270M:**
   ```bash
   (
-    cd gemma_3_270m_lora_finetune &&
+    cd examples/gemma_3_270m_lora_finetune &&
     TRAIN_MODE=wt2 STEPS=200 BATCH_SIZE=4 GRAD_ACCUM_STEPS=1 ./run_train.sh
   )
   ```
 - **Gemma 1B-PT:**
   ```bash
   (
-    cd gemma_3_1b_pt_lora_finetune &&
+    cd examples/gemma_3_1b_pt_lora_finetune &&
     TRAIN_MODE=wt2 STEPS=200 BATCH_SIZE=2 GRAD_ACCUM_STEPS=2 ./run_train.sh
   )
   ```
 - **Qwen2.5-0.5B:**
   ```bash
   (
-    cd qwen_lora_finetune &&
+    cd examples/qwen_lora_finetune &&
     MAX_STEPS=200 BATCH_SIZE=1 GRAD_ACCUM_STEPS=1 ./run_wikitext.sh
   )
   ```
@@ -220,12 +238,12 @@ GPT-2 and Gemma consume masked JSONL prepared by `run_prepare_data.sh`. Qwen con
 - **GPT-2 Small / Medium:**
   ```bash
   (
-    cd gpt2_small_lora_finetune &&
+    cd examples/gpt2_small_lora_finetune &&
     ./run_prepare_data.sh &&
     TRAIN_MODE=mmlu STEPS=200 ./run_train.sh
   )
   (
-    cd gpt2_medium_lora_finetune &&
+    cd examples/gpt2_medium_lora_finetune &&
     ./run_prepare_data.sh &&
     TRAIN_MODE=mmlu STEPS=200 ./run_train.sh
   )
@@ -233,12 +251,12 @@ GPT-2 and Gemma consume masked JSONL prepared by `run_prepare_data.sh`. Qwen con
 - **Gemma 270M / 1B-PT:**
   ```bash
   (
-    cd gemma_3_270m_lora_finetune &&
+    cd examples/gemma_3_270m_lora_finetune &&
     ./run_prepare_data.sh &&
     TRAIN_MODE=mmlu STEPS=200 ./run_train.sh
   )
   (
-    cd gemma_3_1b_pt_lora_finetune &&
+    cd examples/gemma_3_1b_pt_lora_finetune &&
     ./run_prepare_data.sh &&
     TRAIN_MODE=mmlu STEPS=200 ./run_train.sh
   )
@@ -246,7 +264,7 @@ GPT-2 and Gemma consume masked JSONL prepared by `run_prepare_data.sh`. Qwen con
 - **Qwen2.5-0.5B:**
   ```bash
   (
-    cd qwen_lora_finetune &&
+    cd examples/qwen_lora_finetune &&
     MAX_STEPS=150 BATCH_SIZE=8 ./run_mmlu.sh
   )
   ```
@@ -256,9 +274,9 @@ GPT-2 and Gemma consume masked JSONL prepared by `run_prepare_data.sh`. Qwen con
 export GPT2_SMALL_MODEL_DIR=$MFT_MODEL_ROOT/gpt2
 export WT2_DATA_DIR=$MFT_DATA_ROOT/wikitext2/wikitext-2-raw
 
-cmake -S gpt2_small_lora_finetune -B gpt2_small_lora_finetune/build
-cmake --build gpt2_small_lora_finetune/build --target train_full -j
-gpt2_small_lora_finetune/build/train_full \
+cmake -S examples/gpt2_small_lora_finetune -B examples/gpt2_small_lora_finetune/build
+cmake --build examples/gpt2_small_lora_finetune/build --target train_full -j
+examples/gpt2_small_lora_finetune/build/train_full \
   --data_dir "$WT2_DATA_DIR" \
   --pretrained_dir "$GPT2_SMALL_MODEL_DIR" \
   --output_path runs/gpt2_small_full_ft.safetensors \
@@ -281,7 +299,7 @@ Resolution order for maintained scripts is:
    `QWEN_MODEL_DIR` or `QWEN_DATA_DIR`;
 2. shared roots `MFT_MODEL_ROOT` and `MFT_DATA_ROOT`;
 3. the repo-local fallback directories such as
-   `qwen_lora_finetune/pretrained/` and `data/wikitext2/wikitext-2-raw/`.
+   `examples/qwen_lora_finetune/pretrained/` and `data/wikitext2/wikitext-2-raw/`.
 
 The fallback directories are useful for local research, but they are ignored by
 Git and should not be used as a release mechanism. For a new machine or CI
@@ -312,10 +330,23 @@ Detailed layout and download examples are documented in
 
 ### Adding New Models
 
-MobileFineTuner's modular architecture supports easy extension to new models. Key interfaces:
-- `Tensor` class for multi-dimensional arrays
-- `ops::` namespace for differentiable operations
-- Model graph definition (see `finetune_ops/graph/gpt2_model.cpp` and `gemma_model.cpp`)
+MobileFineTuner follows the same high-level split used by PyTorch/Transformers:
+
+- `ModelRegistry::inspect_pretrained(model_dir)` reads `config.json` and
+  identifies the supported model family, assets, tied-embedding behavior, and
+  default LoRA targets.
+- `TokenizerFactory::from_pretrained(model_dir)` returns the correct
+  model-specific tokenizer behind one `ops::Tokenizer` interface.
+- model graph classes under `finetune_ops/graph/` implement the architecture
+  math and HuggingFace weight-name mapping.
+- LoRA injection is defined by target module names, not by application
+  directory names.
+
+Different models should keep their own tokenizer algorithms. The framework
+standardizes how applications request tokenization; it does not force GPT-2,
+Gemma, and Qwen to share one vocabulary or pre-tokenizer.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the extension contract.
 
 ---
 
@@ -371,6 +402,30 @@ Fast and safe tensor serialization:
 
 ---
 
+## Architecture
+
+The reusable library is organized around HuggingFace-style runtime assets rather
+than bundled checkpoints:
+
+```cpp
+#include "mobile_finetuner/mobile_finetuner.h"
+
+auto spec = ops::ModelRegistry::inspect_pretrained(model_dir);
+auto tokenizer = ops::TokenizerFactory::from_pretrained(model_dir);
+```
+
+`spec.family` selects the graph implementation, `tokenizer` owns the
+model-specific tokenization algorithm, and SafeTensors loading maps external
+checkpoint keys into the selected graph. This is an `AutoConfig` +
+`AutoTokenizer`-style discovery layer, not a full `AutoModel` or model-agnostic
+trainer yet. Existing trainers still bind concrete graph classes, while the
+actual training path remains native C++.
+
+Detailed design and extension rules are in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+---
+
 ## Runtime Memory Controls
 
 MobileFineTuner keeps the stable library focused on transparent C++ training
@@ -405,12 +460,12 @@ Result: Forward/backward runs on `batch_size / grad_accum_steps = 2` samples at 
 
 Measure language modeling quality:
 ```bash
-cmake -S gpt2_small_lora_finetune -B gpt2_small_lora_finetune/build
-cmake --build gpt2_small_lora_finetune/build --target eval_ppl -j
-gpt2_small_lora_finetune/build/eval_ppl \
+cmake -S examples/gpt2_small_lora_finetune -B examples/gpt2_small_lora_finetune/build
+cmake --build examples/gpt2_small_lora_finetune/build --target eval_ppl -j
+examples/gpt2_small_lora_finetune/build/eval_ppl \
   --data_root "$MFT_DATA_ROOT/wikitext2/wikitext-2-raw" \
   --pretrained_dir "$MFT_MODEL_ROOT/gpt2" \
-  --lora_path gpt2_small_lora_finetune/outputs/lora_final.safetensors \
+  --lora_path examples/gpt2_small_lora_finetune/outputs/lora_final.safetensors \
   --lora_merge 1
 ```
 
@@ -423,28 +478,28 @@ gpt2_small_lora_finetune/build/eval_ppl \
 Multi-task language understanding:
 ```bash
 (
-  cd gpt2_small_lora_finetune &&
+  cd examples/gpt2_small_lora_finetune &&
   ./run_eval.sh
 )
 (
-  cd gpt2_medium_lora_finetune &&
+  cd examples/gpt2_medium_lora_finetune &&
   ./run_eval.sh
 )
 (
-  cd gemma_3_270m_lora_finetune &&
+  cd examples/gemma_3_270m_lora_finetune &&
   ./run_eval.sh
 )
 (
-  cd gemma_3_1b_pt_lora_finetune &&
+  cd examples/gemma_3_1b_pt_lora_finetune &&
   ./run_eval.sh
 )
 
 # Direct GPT-2 eval binary invocation
-gpt2_small_lora_finetune/build/eval_mmlu \
+examples/gpt2_small_lora_finetune/build/eval_mmlu \
   --mmlu_root "$MFT_DATA_ROOT/mmlu/data" \
   --split dev \
   --pretrained_dir "$MFT_MODEL_ROOT/gpt2" \
-  --lora_path gpt2_small_lora_finetune/outputs/lora_final.safetensors \
+  --lora_path examples/gpt2_small_lora_finetune/outputs/lora_final.safetensors \
   --lora_merge 1 \
   --fewshot 0
 ```
@@ -480,43 +535,29 @@ MobileFineTuner/
 │   ├── finetune_ops/
 │   │   ├── core/                       # Tensor, autograd, memory manager
 │   │   ├── graph/                      # GPT-2, Gemma, Qwen graphs
-│   │   ├── nn/                         # Layers (Linear, LoRA, embeddings, norms)
+│   │   ├── nn/                         # LoRA layers
 │   │   ├── optim/                      # Optimizers and trainers
 │   │   └── data/                       # WikiText-2, MMLU dataset loaders/tokenizers
 │   ├── include/mobile_finetuner/       # Stable public umbrella header
 │   ├── cmake/                          # CMake package config templates
 │   └── CMakeLists.txt
-├── gpt2_small_lora_finetune/           # GPT-2 Small LoRA + full FT (WikiText-2, MMLU)
-│   ├── src/{main.cpp, main_full.cpp, eval_ppl.cpp, eval_mmlu.cpp}
-│   ├── run_{train,eval,prepare_data}.sh
-│   └── CMakeLists.txt
-├── gpt2_medium_lora_finetune/          # GPT-2 Medium LoRA (WikiText-2, MMLU)
-│   ├── src/{main.cpp, eval_ppl.cpp, eval_mmlu.cpp}
-│   ├── run_{train,eval,prepare_data}.sh
-│   └── CMakeLists.txt
-├── gemma_3_270m_lora_finetune/         # Gemma 270M LoRA (WikiText-2, MMLU)
-│   ├── src/{main.cpp, eval_mmlu_gemma.cpp}
-│   ├── run_{train,eval,prepare_data}.sh
-│   └── CMakeLists.txt
-├── gemma_3_1b_pt_lora_finetune/        # Gemma 1B-PT LoRA (WikiText-2, MMLU)
-│   ├── src/{main.cpp, eval_mmlu_gemma.cpp}
-│   ├── run_{train,eval,prepare_data}.sh
-│   └── CMakeLists.txt
-├── qwen_lora_finetune/                 # Qwen2.5-0.5B LoRA (WikiText-2, MMLU)
-│   ├── src/{wikitext_main.cpp, mmlu_main.cpp}
-│   ├── run_{wikitext,mmlu}.sh
-│   └── CMakeLists.txt
+├── examples/                           # Runnable model-specific applications
+│   ├── common/                         # Shared example-only evaluation helpers
+│   ├── gpt2_small_lora_finetune/       # GPT-2 Small LoRA + full FT
+│   ├── gpt2_medium_lora_finetune/      # GPT-2 Medium LoRA
+│   ├── gemma_3_270m_lora_finetune/     # Gemma 270M LoRA
+│   ├── gemma_3_1b_pt_lora_finetune/    # Gemma 1B-PT LoRA
+│   └── qwen_lora_finetune/             # Qwen2.5-0.5B LoRA
 ├── scripts/                            # Automation and orchestration
 │   ├── android/                        # Native Android build/run helpers
 │   ├── lib/                            # Shared shell helpers
 │   ├── run_training_smoke.sh
 │   └── run_training_real_assets.sh
-├── data/                               # Optional local dataset root, ignored by Git
-├── runs/                               # Optional local output root, ignored by Git
-├── Rubbish/                            # Archived experiments and generated artifacts
 └── README.md
 ```
 
+Local data, run-output, review, and archive directories may exist in developer
+checkouts, but they are ignored and excluded from source releases.
 
 ---
 

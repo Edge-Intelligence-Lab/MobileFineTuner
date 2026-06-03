@@ -7,7 +7,9 @@ operator/install/
 operators/build/
 operators/build_*/
 */build/
+examples/*/build/
 */build-android/
+examples/*/build-android/
 */cmake-build-*/
 *.cmake
 CMakeCache.txt
@@ -24,14 +26,10 @@ cmake_install.cmake
 *.dll
 
 # Model weights and data (too large for GitHub)
+data/
 gemma-3-270m/
 gemma-3-1b/
 **/pretrained/
-data/wikitext2/
-data/pretokenized/
-data/mmlu/data.tar
-data/mmlu/data/
-data/qnli/
 *.safetensors
 *.bin
 *.pt

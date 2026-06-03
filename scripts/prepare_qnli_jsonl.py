@@ -191,7 +191,7 @@ def main() -> None:
     args = parser.parse_args()
 
     repo_root = Path(repo_root_from(__file__))
-    model_dir = args.model_dir or resolve_model_dir("qwen", repo_root / "qwen_lora_finetune/pretrained")
+    model_dir = args.model_dir or resolve_model_dir("qwen", repo_root / "examples/qwen_lora_finetune/pretrained")
     output_dir = Path(args.output_dir) if args.output_dir else repo_root / f"data/qnli/qwen_qnli_s{args.seq_len}"
     cache_dir = Path(args.cache_dir) if args.cache_dir else repo_root / "data/qnli/_cache"
 

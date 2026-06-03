@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")"/../.. && pwd)"
 source "$ROOT/scripts/android/android_env.sh"
 
-APP_DIR="$ROOT/qwen_lora_finetune"
+APP_DIR="$ROOT/examples/qwen_lora_finetune"
 BUILD_DIR="$APP_DIR/build-android"
 NDK_ROOT="$(mf_android_resolve_ndk)"
 TOOLCHAIN="$NDK_ROOT/build/cmake/android.toolchain.cmake"

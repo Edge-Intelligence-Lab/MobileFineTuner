@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")"/../.. && pwd)"
 source "$ROOT/scripts/android/android_env.sh"
 
-BUILD_DIR="$ROOT/qwen_lora_finetune/build-android"
+BUILD_DIR="$ROOT/examples/qwen_lora_finetune/build-android"
 BIN_LOCAL="$BUILD_DIR/train_wikitext"
 MONITOR_SRC="$ROOT/scripts/android/proc_mem_monitor.cpp"
 MONITOR_LOCAL="$BUILD_DIR/proc_mem_monitor"

@@ -17,19 +17,19 @@ run_case() {
   )
 }
 
-run_case "gpt2_small_wt2" "gpt2_small_lora_finetune" \
+run_case "gpt2_small_wt2" "examples/gpt2_small_lora_finetune" \
   env TRAIN_MODE=wt2 STEPS="$REAL_STEPS" BATCH_SIZE=1 GRAD_ACCUM=1 SEQ_LEN="$SEQ_LEN" ./run_train.sh
 
-run_case "gpt2_medium_wt2" "gpt2_medium_lora_finetune" \
+run_case "gpt2_medium_wt2" "examples/gpt2_medium_lora_finetune" \
   env TRAIN_MODE=wt2 STEPS="$REAL_STEPS" BATCH_SIZE=1 GRAD_ACCUM=1 SEQ_LEN="$SEQ_LEN" ./run_train.sh
 
-run_case "gemma_270m_wt2" "gemma_3_270m_lora_finetune" \
+run_case "gemma_270m_wt2" "examples/gemma_3_270m_lora_finetune" \
   env TRAIN_MODE=wt2 STEPS="$REAL_STEPS" BATCH_SIZE=1 GRAD_ACCUM=1 SEQ_LEN="$SEQ_LEN" ./run_train.sh
 
-run_case "gemma_1b_pt_wt2" "gemma_3_1b_pt_lora_finetune" \
+run_case "gemma_1b_pt_wt2" "examples/gemma_3_1b_pt_lora_finetune" \
   env TRAIN_MODE=wt2 STEPS="$REAL_STEPS" BATCH_SIZE=1 GRAD_ACCUM=1 SEQ_LEN="$SEQ_LEN" ./run_train.sh
 
-run_case "qwen_wikitext" "qwen_lora_finetune" \
+run_case "qwen_wikitext" "examples/qwen_lora_finetune" \
   env MAX_STEPS="$REAL_STEPS" BATCH_SIZE=1 GRAD_ACCUM_STEPS=1 SEQ_LEN="$SEQ_LEN" ./run_wikitext.sh
 
 echo

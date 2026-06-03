@@ -53,6 +53,19 @@ Then export:
 export MFT_MODEL_ROOT=/path/to/mft-models
 ```
 
+Every model snapshot must include `config.json` with a supported HuggingFace
+`model_type`. MobileFineTuner uses that field in `ModelRegistry` and
+`TokenizerFactory`:
+
+```text
+gpt2      -> GPT-2 graph + GPT-2 byte-level BPE tokenizer
+gemma*    -> Gemma graph + Gemma tokenizer
+qwen*     -> Qwen graph + Qwen byte-level BPE tokenizer
+```
+
+Do not infer the model family from `tokenizer.json` alone. Different model
+families reuse that filename with incompatible tokenization rules.
+
 The runner scripts also accept per-model overrides:
 
 ```bash
@@ -63,12 +76,12 @@ export GEMMA_1B_PT_MODEL_DIR=/path/to/gemma-3-1b-pt
 export QWEN_MODEL_DIR=/path/to/Qwen2.5-0.5B
 ```
 
-For backwards-compatible local experiments, each model application also checks
-its own `pretrained/` directory, for example:
+For backwards-compatible local experiments, each model example also checks its
+own `pretrained/` directory, for example:
 
 ```text
-qwen_lora_finetune/pretrained/
-gpt2_small_lora_finetune/pretrained/
+examples/qwen_lora_finetune/pretrained/
+examples/gpt2_small_lora_finetune/pretrained/
 ```
 
 Do not commit these directories. They are intentionally ignored by Git.
@@ -167,6 +180,23 @@ The real-asset sanity suite requires valid model and dataset paths:
 bash scripts/run_training_real_assets.sh
 ```
 
+Tokenizer-only HuggingFace alignment checks do not require model weights. They
+require local tokenizer snapshots and the Python `transformers` package:
+
+```bash
+export MFT_MODEL_ROOT=/path/to/mft-models
+python3 scripts/generate_tokenizer_hf_golden_fixtures.py \
+  --output runs/tokenizer_golden/hf_tokenizer_golden.jsonl
+
+cmake -S operator -B operator/build -DBUILD_TESTS=ON
+cmake --build operator/build -j4
+MFT_TOKENIZER_GOLDEN_JSONL=runs/tokenizer_golden/hf_tokenizer_golden.jsonl \
+  ctest --test-dir operator/build --output-on-failure -R TokenizerHFGolden
+```
+
+If `MFT_TOKENIZER_GOLDEN_JSONL` is not set, the `TokenizerHFGolden` CTest target
+skips cleanly so source-only builds do not depend on external assets.
+
 ## Runtime Contract
 
 The reusable C++ library does not download assets. Applications must pass asset
@@ -175,7 +205,7 @@ paths explicitly. The common patterns are:
 ```bash
 QWEN_MODEL_DIR=/path/to/Qwen2.5-0.5B \
 QWEN_DATA_DIR=/path/to/wikitext-2-raw \
-./qwen_lora_finetune/run_wikitext.sh
+./examples/qwen_lora_finetune/run_wikitext.sh
 ```
 
 or:

@@ -140,6 +140,52 @@ check_package_files() {
   fi
 }
 
+check_no_generated_caches() {
+  local matches
+  matches="$(
+    cd "$ROOT" && find . \
+      -path './.git' -prune -o \
+      -path './.agents' -prune -o \
+      -path './.aris' -prune -o \
+      -path './Rubbish' -prune -o \
+      -path './runs' -prune -o \
+      -path './review-stage' -prune -o \
+      -name __pycache__ -type d -print
+  )"
+  if [ -n "$matches" ]; then
+    say "[FAIL] Python cache directories remain in the maintained tree:"
+    say "$matches"
+    fail=1
+  else
+    say "[OK]   No Python cache directories in maintained tree"
+  fi
+}
+
+check_no_stale_operator_api() {
+  local stale=(
+    operator/finetune_ops/model
+    operator/finetune_ops/nn/embedding.cpp
+    operator/finetune_ops/nn/embedding.h
+    operator/finetune_ops/optim/lora_optimizer.cpp
+    operator/finetune_ops/optim/lora_optimizer.h
+    operator/finetune_ops/optim/train_lora_gemma.cpp
+  )
+  local path
+  local found=()
+  for path in "${stale[@]}"; do
+    if [ -e "$ROOT/$path" ]; then
+      found+=("$path")
+    fi
+  done
+  if [ "${#found[@]}" -gt 0 ]; then
+    say "[FAIL] Stale operator API files remain in maintained tree:"
+    printf '  %s\n' "${found[@]}"
+    fail=1
+  else
+    say "[OK]   Stale operator API files are archived"
+  fi
+}
+
 check_shell_syntax() {
   local scripts=(
     scripts/check_local_assets.sh
@@ -151,13 +197,13 @@ check_shell_syntax() {
     scripts/android/build_qwen_android.sh
     scripts/android/run_qwen_qnli_native_phone.sh
     scripts/android/stage_qwen_qnli_phone_assets.sh
-    gpt2_small_lora_finetune/run_train.sh
-    gpt2_medium_lora_finetune/run_train.sh
-    gemma_3_270m_lora_finetune/run_train.sh
-    gemma_3_1b_pt_lora_finetune/run_train.sh
-    qwen_lora_finetune/run_wikitext.sh
-    qwen_lora_finetune/run_mmlu.sh
-    qwen_lora_finetune/run_qnli.sh
+    examples/gpt2_small_lora_finetune/run_train.sh
+    examples/gpt2_medium_lora_finetune/run_train.sh
+    examples/gemma_3_270m_lora_finetune/run_train.sh
+    examples/gemma_3_1b_pt_lora_finetune/run_train.sh
+    examples/qwen_lora_finetune/run_wikitext.sh
+    examples/qwen_lora_finetune/run_mmlu.sh
+    examples/qwen_lora_finetune/run_qnli.sh
   )
   local path
   for path in "${scripts[@]}"; do
@@ -170,6 +216,8 @@ check_no_personal_paths
 check_no_archived_experiment_surface
 check_large_source_files
 check_package_files
+check_no_generated_caches
+check_no_stale_operator_api
 check_shell_syntax
 
 if [ "$fail" -ne 0 ]; then
