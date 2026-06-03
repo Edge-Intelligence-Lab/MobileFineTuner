@@ -192,7 +192,27 @@ MFT_TOKENIZER_GOLDEN_JSONL=runs/tokenizer_golden/hf_tokenizer_golden.jsonl \
 See [docs/MODEL_ASSETS.md](docs/MODEL_ASSETS.md) for the tokenizer alignment
 asset contract.
 
-### 3. Run LoRA Fine-Tuning
+### 3. Use the Unified C++ API
+
+Applications that do not need model-specific diagnostics can use the Auto API:
+
+```cpp
+#include "mobile_finetuner/mobile_finetuner.h"
+
+auto tokenizer = ops::TokenizerFactory::from_pretrained(model_dir);
+auto model = ops::AutoModelForCausalLM::from_pretrained(model_dir);
+model->init_lora(ops::AutoLoraConfig::attention_qkvo());
+
+ops::AutoTrainerConfig trainer_cfg;
+trainer_cfg.learning_rate = 2e-4f;
+ops::AutoTrainer trainer(*model, trainer_cfg);
+auto step = trainer.train_step(input_ids, attention_mask, labels);
+```
+
+The lower-level GPT-2, Gemma, and Qwen graph classes remain available for
+alignment debugging and model-specific experiment runners.
+
+### 4. Run LoRA Fine-Tuning
 
 #### WikiText-2 LoRA
 - **GPT-2 Small (124M):**
@@ -337,6 +357,9 @@ MobileFineTuner follows the same high-level split used by PyTorch/Transformers:
   default LoRA targets.
 - `TokenizerFactory::from_pretrained(model_dir)` returns the correct
   model-specific tokenizer behind one `ops::Tokenizer` interface.
+- `AutoModelForCausalLM::from_pretrained(model_dir)` constructs the supported
+  GPT-2, Gemma, or Qwen graph and loads SafeTensors with correct layout defaults.
+- `AutoTrainer` provides a shared one-step causal-LM LoRA training core.
 - model graph classes under `finetune_ops/graph/` implement the architecture
   math and HuggingFace weight-name mapping.
 - LoRA injection is defined by target module names, not by application
@@ -412,14 +435,14 @@ than bundled checkpoints:
 
 auto spec = ops::ModelRegistry::inspect_pretrained(model_dir);
 auto tokenizer = ops::TokenizerFactory::from_pretrained(model_dir);
+auto model = ops::AutoModelForCausalLM::from_pretrained(model_dir);
 ```
 
 `spec.family` selects the graph implementation, `tokenizer` owns the
-model-specific tokenization algorithm, and SafeTensors loading maps external
-checkpoint keys into the selected graph. This is an `AutoConfig` +
-`AutoTokenizer`-style discovery layer, not a full `AutoModel` or model-agnostic
-trainer yet. Existing trainers still bind concrete graph classes, while the
-actual training path remains native C++.
+model-specific tokenization algorithm, and `AutoModelForCausalLM` maps external
+checkpoint keys into the selected graph. `AutoTrainer` provides the shared
+native C++ one-step LoRA training core. Concrete graph classes remain public for
+specialized diagnostics and model-specific experiments.
 
 Detailed design and extension rules are in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

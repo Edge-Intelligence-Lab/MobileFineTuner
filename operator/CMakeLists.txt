@@ -118,6 +118,7 @@ set(FINETUNE_SOURCES
     finetune_ops/graph/gpt2_model.cpp
     finetune_ops/graph/lora_injector.cpp
     finetune_ops/graph/model_registry.cpp
+    finetune_ops/graph/auto_model.cpp
     # Qwen model and MMLU dataset
     finetune_ops/graph/qwen_model.cpp
     finetune_ops/data/mmlu_dataset.cpp
@@ -128,6 +129,7 @@ set(FINETUNE_SOURCES
     finetune_ops/optim/optimizer.cpp
     finetune_ops/optim/adam.cpp
     finetune_ops/optim/trainer.cpp
+    finetune_ops/optim/auto_trainer.cpp
     
     # Stage C: LoRA save/load
     finetune_ops/graph/lora_saver.cpp
@@ -233,6 +235,7 @@ install(DIRECTORY
 
 install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/adam.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/auto_trainer.h
     ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/gemma_trainer.h
     ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/optimizer.h
     ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/trainer.h
@@ -411,6 +414,14 @@ if(BUILD_TESTS)
         )
         target_link_libraries(test_model_registry operators)
         add_test(NAME ModelRegistry COMMAND test_model_registry)
+    endif()
+
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/graph/test_auto_model.cpp)
+        add_executable(test_auto_model
+            finetune_ops/graph/test_auto_model.cpp
+        )
+        target_link_libraries(test_auto_model operators)
+        add_test(NAME AutoModel COMMAND test_auto_model)
     endif()
 
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/test_gpt2_lora_two_step_smoke.cpp)

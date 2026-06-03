@@ -12,6 +12,8 @@ HuggingFace-style model_dir
         v
 ModelRegistry      -> model family, asset paths, default LoRA targets
 TokenizerFactory   -> model-specific tokenizer through one interface
+AutoModelForCausalLM -> concrete graph dispatch + SafeTensors loading + LoRA
+AutoTrainer       -> shared one-step causal-LM LoRA training core
 Graph class        -> GPT-2 / Gemma / Qwen forward and backward math
 SafeTensorsLoader  -> external checkpoint tensors into graph weights
 LoRA modules       -> trainable adapters on named target projections
@@ -82,15 +84,27 @@ The graph owns:
 - LoRA target attachment;
 - trainable parameter discovery.
 
-The current graph classes are explicit instead of hidden behind one large
+The graph classes remain explicit instead of hidden behind one large
 runtime-polymorphic base class. This keeps the math readable and makes it clear
-where architecture-specific behavior lives. Generic application code should
-start from `ModelRegistry` and branch once on `spec.family`.
+where architecture-specific behavior lives. Generic application code should use
+`AutoModelForCausalLM` when it only needs the common causal-LM LoRA surface, and
+drop to concrete graph classes when it needs model-specific diagnostics or
+alignment hooks.
 
-MobileFineTuner does not yet expose a full `AutoModel` or model-agnostic
-`AutoTrainer`. Existing trainers still bind concrete graph classes. The stable
-layer introduced here is discovery and tokenizer dispatch; graph construction
-and trainer unification are later extension steps.
+`AutoModelForCausalLM` uses `ModelRegistry` to construct GPT-2, Gemma, or Qwen,
+load SafeTensors with family-correct layout defaults, initialize LoRA, run
+forward, and expose trainable parameters. `AutoTrainer` sits one layer above it
+and implements the shared one-step training core:
+
+```text
+input_ids + attention_mask + labels
+        |
+        v
+AutoModelForCausalLM::forward
+        |
+        v
+lm_cross_entropy -> backward -> grad clip -> Adam -> zero_grad
+```
 
 ## Tokenizer Extension Contract
 
@@ -144,7 +158,8 @@ This mirrors the discovery part of the PyTorch/Transformers pattern:
 ```text
 AutoConfig      -> ModelRegistry
 AutoTokenizer   -> TokenizerFactory
-AutoModel class  -> not unified yet; use explicit C++ graph classes
+AutoModel class  -> AutoModelForCausalLM
+Trainer core     -> AutoTrainer
 PEFT targets    -> default_lora_targets + graph LoRA injection
 ```
 
