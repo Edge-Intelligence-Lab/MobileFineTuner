@@ -146,7 +146,12 @@ jobs:
       - name: Android visualizer build
         run: |
           cd android-visualizer
-          ./gradlew :mft-sdk:assembleRelease :app:assembleDebug
+          ./gradlew \
+            :mft-sdk:assembleRelease \
+            :mft-sdk:assembleAndroidTest \
+            :mft-sdk:publishReleasePublicationToLocalReleaseRepository \
+            :sdk-sample:assembleDebug \
+            :app:assembleDebug
 
       - name: Five-model smoke
         run: bash scripts/run_training_smoke.sh

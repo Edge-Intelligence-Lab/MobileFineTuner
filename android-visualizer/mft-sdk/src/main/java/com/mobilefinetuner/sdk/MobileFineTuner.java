@@ -1,5 +1,6 @@
 package com.mobilefinetuner.sdk;
 
+import java.io.File;
 import java.util.Arrays;
 
 /**
@@ -25,6 +26,14 @@ public final class MobileFineTuner implements AutoCloseable {
 
     public static String buildInfo() {
         return nativeBuildInfo();
+    }
+
+    public static SelfTestResult selfTest(File workingDir) {
+        if (workingDir == null) {
+            throw new IllegalArgumentException("workingDir must not be null");
+        }
+        double[] result = nativeSelfTest(workingDir.getAbsolutePath());
+        return new SelfTestResult((float) result[0], (int) result[1], result[2]);
     }
 
     public static MobileFineTuner open(String modelDir) {
@@ -131,6 +140,7 @@ public final class MobileFineTuner implements AutoCloseable {
     }
 
     private static native String nativeBuildInfo();
+    private static native double[] nativeSelfTest(String workingDir);
     private static native long nativeCreate(String modelDir, boolean loadWeights);
     private static native void nativeInitLora(
             long handle,
@@ -229,6 +239,18 @@ public final class MobileFineTuner implements AutoCloseable {
         private TrainStepResult(float loss, int trainableTensorCount) {
             this.loss = loss;
             this.trainableTensorCount = trainableTensorCount;
+        }
+    }
+
+    public static final class SelfTestResult {
+        public final float loss;
+        public final int trainableTensorCount;
+        public final double elapsedMillis;
+
+        private SelfTestResult(float loss, int trainableTensorCount, double elapsedMillis) {
+            this.loss = loss;
+            this.trainableTensorCount = trainableTensorCount;
+            this.elapsedMillis = elapsedMillis;
         }
     }
 }

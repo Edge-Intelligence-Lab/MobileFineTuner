@@ -75,3 +75,8 @@ import com.mobilefinetuner.sdk.MobileFineTuner;
 It wraps the same C++ `AutoModelForCausalLM` and `AutoTrainer` objects through
 JNI. The Android SDK is a packaging layer, not a separate implementation. See
 `docs/ANDROID_SDK.md` for build, ABI, asset layout, and Java call-order details.
+
+The Android API also exposes `MobileFineTuner.selfTest(File workingDir)`, which
+runs a tiny synthetic native LoRA training step on device. This is intended for
+installation validation and CI/device smoke testing; real applications should
+still pass their own HuggingFace-style `modelDir` to `MobileFineTuner.open`.

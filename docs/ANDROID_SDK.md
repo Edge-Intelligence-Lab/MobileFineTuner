@@ -44,6 +44,38 @@ cd android-visualizer
 ./gradlew :mft-sdk:assembleRelease
 ```
 
+Publish to a local Maven repository:
+
+```bash
+bash scripts/android/publish_mft_sdk_local.sh
+```
+
+Output Maven repository:
+
+```text
+android-visualizer/mft-sdk/build/repo
+```
+
+Gradle dependency:
+
+```kotlin
+repositories {
+    maven {
+        url = uri("/path/to/MobileFineTuner/android-visualizer/mft-sdk/build/repo")
+    }
+}
+
+dependencies {
+    implementation("com.mobilefinetuner:mobilefinetuner-android:0.1.0")
+}
+```
+
+Override the published version when needed:
+
+```bash
+MFT_SDK_VERSION=0.2.0 bash scripts/android/publish_mft_sdk_local.sh
+```
+
 ## Supported ABI
 
 The SDK currently packages `arm64-v8a` only. This matches the phone-training
@@ -68,6 +100,8 @@ copy user-selected files into app-private storage before opening the model.
 
 ```java
 import com.mobilefinetuner.sdk.MobileFineTuner;
+
+MobileFineTuner.SelfTestResult smoke = MobileFineTuner.selfTest(context.getFilesDir());
 
 try (MobileFineTuner mf = MobileFineTuner.open(modelDir, true)) {
     mf.initLora(MobileFineTuner.LoraConfig.attentionQkvo());
@@ -97,6 +131,43 @@ Call order:
 length `batchSize * sequenceLength`. Labels use the same shifted causal-LM
 contract as the C++ `AutoTrainer`: ignored positions should be `-100`.
 
+## Device Smoke Test
+
+The SDK includes an instrumentation smoke test that loads the native library and
+runs a tiny synthetic GPT-2 LoRA training step on the device:
+
+```bash
+cd android-visualizer
+./gradlew :mft-sdk:assembleAndroidTest
+./gradlew :mft-sdk:connectedDebugAndroidTest
+```
+
+The smoke test does not require external model weights. It creates a small
+temporary HuggingFace-style config in app-private storage, initializes LoRA, and
+executes one native `AutoTrainer` step.
+
+## Sample App
+
+Build the standalone SDK sample app:
+
+```bash
+cd android-visualizer
+./gradlew :sdk-sample:assembleDebug
+```
+
+The sample depends on `:mft-sdk`, displays JNI build information, and runs the
+same native self-test on launch.
+
+Run the sample-based phone smoke test:
+
+```bash
+bash scripts/android/run_mft_sdk_device_smoke.sh
+```
+
+If installation times out, unlock the phone and allow USB app installation, then
+rerun the script. Some Android builds route adb installs through a confirmation
+screen before package commit.
+
 ## Native Boundary
 
 The JNI bridge is intentionally thin:
@@ -118,8 +189,8 @@ core.
 ## Current Limitations
 
 - `arm64-v8a` only.
-- Java API currently exposes the one-step LoRA training core, not a full
-  dataset loop or checkpoint manager.
+- Java API currently exposes the install self-test and one-step LoRA training
+  core, not a full dataset loop or checkpoint manager.
 - Model files are loaded from normal filesystem paths; the SDK does not load
   directly from compressed APK assets.
 - Full-weight phone training still depends on device memory limits and the

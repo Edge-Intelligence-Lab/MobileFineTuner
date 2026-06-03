@@ -132,6 +132,18 @@ Output AAR:
 mft-sdk/build/outputs/aar/mft-sdk-release.aar
 ```
 
+Publish the SDK to a local Maven repository:
+
+```bash
+bash ../scripts/android/publish_mft_sdk_local.sh
+```
+
+Build the standalone SDK sample app:
+
+```bash
+./gradlew :sdk-sample:assembleDebug
+```
+
 For a release-signed build, configure `keystore.properties` and run:
 
 ```bash
@@ -214,6 +226,7 @@ android-visualizer/
 │       └── cpp/
 │           ├── CMakeLists.txt           # Builds JNI + links MF C++ core
 │           └── mobile_finetuner_jni.cpp # Thin JNI bridge
+├── sdk-sample/                           # Minimal consumer app for SDK smoke
 ├── app/
 │   └── src/main/java/com/mobilefinetuner/visualizer/
 │       ├── MainActivity.kt               # Entry point and app shell

@@ -2,8 +2,11 @@
 
 #include "mobile_finetuner/mobile_finetuner.h"
 
+#include <chrono>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -128,11 +131,99 @@ std::vector<jfloat> copy_float_array(JNIEnv* env, jfloatArray array, int64_t cou
     return values;
 }
 
+jdoubleArray make_double_array(JNIEnv* env, const jdouble* values, jsize count) {
+    jdoubleArray out = env->NewDoubleArray(count);
+    if (out == nullptr) {
+        return nullptr;
+    }
+    env->SetDoubleArrayRegion(out, 0, count, values);
+    return out;
+}
+
+void fill_parameters(ops::AutoModelForCausalLM& model, float value) {
+    for (const auto& param : model.parameters()) {
+        if (!param || param->dtype() != ops::kFloat32) {
+            continue;
+        }
+        float* data = param->data<float>();
+        for (int64_t i = 0; i < param->numel(); ++i) {
+            data[i] = value;
+        }
+    }
+}
+
 }  // namespace
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_mobilefinetuner_sdk_MobileFineTuner_nativeBuildInfo(JNIEnv* env, jclass) {
     return env->NewStringUTF("MobileFineTuner Android SDK JNI: AutoModelForCausalLM + AutoTrainer");
+}
+
+extern "C" JNIEXPORT jdoubleArray JNICALL
+Java_com_mobilefinetuner_sdk_MobileFineTuner_nativeSelfTest(
+        JNIEnv* env,
+        jclass,
+        jstring working_dir) {
+    return guarded(env, [&]() -> jdoubleArray {
+        const std::string working_dir_string = to_string(env, working_dir);
+        if (working_dir_string.empty()) {
+            throw std::invalid_argument("workingDir must not be empty");
+        }
+
+        namespace fs = std::filesystem;
+        const fs::path root = fs::path(working_dir_string) / "mft_sdk_native_self_test";
+        fs::create_directories(root);
+        {
+            std::ofstream config(root / "config.json");
+            if (!config.is_open()) {
+                throw std::runtime_error("Failed to create self-test config.json");
+            }
+            config << R"({"model_type":"gpt2","vocab_size":16,"n_positions":8,"n_embd":8,"n_layer":1,"n_head":2})";
+        }
+
+        const auto t0 = std::chrono::steady_clock::now();
+
+        ops::AutoModelLoadOptions options;
+        options.load_weights = false;
+        options.verbose = false;
+
+        auto model = ops::AutoModelForCausalLM::from_pretrained(root.string(), options);
+        fill_parameters(*model, 0.01f);
+
+        ops::AutoLoraConfig lora;
+        lora.rank = 2;
+        lora.alpha = 4.0f;
+        lora.dropout = 0.0f;
+        lora.seed = 7;
+        model->init_lora(lora);
+
+        int32_t ids[] = {1, 2, 3};
+        float mask[] = {1.0f, 1.0f, 1.0f};
+        int32_t labels[] = {-100, 2, 3};
+        auto input_ids = std::make_shared<ops::Tensor>(
+            std::vector<int64_t>{1, 3}, ids, ops::kInt32, ops::kCPU);
+        auto attention_mask = std::make_shared<ops::Tensor>(
+            std::vector<int64_t>{1, 3}, mask, ops::kFloat32, ops::kCPU);
+        auto label_tensor = std::make_shared<ops::Tensor>(
+            std::vector<int64_t>{1, 3}, labels, ops::kInt32, ops::kCPU);
+
+        ops::AutoTrainerConfig trainer_cfg;
+        trainer_cfg.learning_rate = 1e-3f;
+        ops::AutoTrainer trainer(*model, trainer_cfg);
+        const ops::AutoTrainStepResult step =
+            trainer.train_step(input_ids, attention_mask, label_tensor);
+
+        const auto t1 = std::chrono::steady_clock::now();
+        const double elapsed_ms =
+            std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+        jdouble values[3] = {
+            static_cast<jdouble>(step.loss),
+            static_cast<jdouble>(step.trainable_tensor_count),
+            static_cast<jdouble>(elapsed_ms)
+        };
+        return make_double_array(env, values, 3);
+    }, static_cast<jdoubleArray>(nullptr));
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -270,12 +361,7 @@ Java_com_mobilefinetuner_sdk_MobileFineTuner_nativeTrainStep(
             static_cast<jdouble>(result.loss),
             static_cast<jdouble>(result.trainable_tensor_count)
         };
-        jdoubleArray out = env->NewDoubleArray(2);
-        if (out == nullptr) {
-            return nullptr;
-        }
-        env->SetDoubleArrayRegion(out, 0, 2, values);
-        return out;
+        return make_double_array(env, values, 2);
     }, static_cast<jdoubleArray>(nullptr));
 }
 

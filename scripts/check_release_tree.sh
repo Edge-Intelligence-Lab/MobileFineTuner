@@ -21,7 +21,10 @@ check_no_personal_paths() {
     scripts/run_training_real_assets.sh
     scripts/android/android_env.sh
     scripts/android/adb_resource_monitor.sh
+    scripts/android/build_mft_sdk_aar.sh
     scripts/android/build_qwen_android.sh
+    scripts/android/publish_mft_sdk_local.sh
+    scripts/android/run_mft_sdk_device_smoke.sh
     scripts/android/run_qwen_qnli_native_phone.sh
     scripts/android/stage_qwen_qnli_phone_assets.sh
     operator/CMakeLists.txt
@@ -102,6 +105,8 @@ check_large_source_files() {
       -not -path './pytorch_runs/*' \
       -not -path './review-stage/*' \
       -not -path './Rubbish/*' \
+      -not -path './android-visualizer/*/.cxx/*' \
+      -not -path './android-visualizer/*/build/*' \
       -not -path './operator/build*/*' \
       -not -path './*/build/*' \
       -not -path './*/build-android/*' \
@@ -194,7 +199,10 @@ check_shell_syntax() {
     scripts/lib/asset_paths.sh
     scripts/android/adb_resource_monitor.sh
     scripts/android/android_env.sh
+    scripts/android/build_mft_sdk_aar.sh
     scripts/android/build_qwen_android.sh
+    scripts/android/publish_mft_sdk_local.sh
+    scripts/android/run_mft_sdk_device_smoke.sh
     scripts/android/run_qwen_qnli_native_phone.sh
     scripts/android/stage_qwen_qnli_phone_assets.sh
     examples/gpt2_small_lora_finetune/run_train.sh

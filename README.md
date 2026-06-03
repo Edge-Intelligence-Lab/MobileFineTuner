@@ -131,6 +131,14 @@ The AAR packages the Java API and native JNI bridge, while model weights and
 datasets remain external runtime assets. See [docs/ANDROID_SDK.md](docs/ANDROID_SDK.md)
 for the Android SDK contract.
 
+For consumer-style integration, publish the SDK to a local Maven repository:
+
+```bash
+bash scripts/android/publish_mft_sdk_local.sh
+```
+
+The standalone sample consumer app is available at `android-visualizer/sdk-sample`.
+
 ---
 
 ## Quick Start
