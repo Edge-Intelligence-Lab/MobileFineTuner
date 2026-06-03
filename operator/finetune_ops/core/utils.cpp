@@ -172,12 +172,12 @@ std::string tensor_to_string(const Tensor& tensor,
         case kInt32: oss << "int32"; break;
         case kInt8: oss << "int8"; break;
         case kFloat16: oss << "float16"; break;
+        case kBFloat16: oss << "bfloat16"; break;
         case kInt64: oss << "int64"; break;
         case kBool: oss << "bool"; break;
         case kUInt8: oss << "uint8"; break;
     }
 
-    const float* data = tensor.data<float>();
     if (tensor.numel() == 0) {
         oss << ", data=[])";
         return oss.str();
@@ -187,7 +187,17 @@ std::string tensor_to_string(const Tensor& tensor,
     size_t max_elements = 10;
     for (size_t i = 0; i < std::min(static_cast<size_t>(tensor.numel()), max_elements); ++i) {
         if (i > 0) oss << ", ";
-        oss << std::fixed << std::setprecision(4) << data[i];
+        if (tensor.dtype() == kFloat32) {
+            oss << std::fixed << std::setprecision(4) << tensor.data<float>()[i];
+        } else if (tensor.dtype() == kFloat16) {
+            oss << std::fixed << std::setprecision(4) << fp16_bits_to_float32(tensor.data<uint16_t>()[i]);
+        } else if (tensor.dtype() == kBFloat16) {
+            oss << std::fixed << std::setprecision(4) << bf16_bits_to_float32(tensor.data<uint16_t>()[i]);
+        } else if (tensor.dtype() == kInt32) {
+            oss << tensor.data<int32_t>()[i];
+        } else {
+            oss << "?";
+        }
     }
     if (static_cast<size_t>(tensor.numel()) > max_elements) {
         oss << ", ...";

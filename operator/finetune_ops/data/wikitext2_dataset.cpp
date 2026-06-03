@@ -384,7 +384,9 @@ Batch WikiText2Dataset::next_batch(size_t batch_size, bool need_loop) {
         }
         std::fill(batch_input_buffer_.begin(), batch_input_buffer_.end(), static_cast<int32_t>(cfg_.pad_id));
         std::fill(batch_label_buffer_.begin(), batch_label_buffer_.end(), -100);
-        std::fill(batch_attn_buffer_.begin(), batch_attn_buffer_.end(), 0.0f);
+        // Match the PyTorch JSONL/QNLI loader exactly: right-pad input_ids and labels,
+        // but keep attention_mask full-ones across the padded sequence.
+        std::fill(batch_attn_buffer_.begin(), batch_attn_buffer_.end(), 1.0f);
 
         size_t start = cursor_;
         size_t end = std::min(cursor_ + batch_size, order_.size());
@@ -400,7 +402,12 @@ Batch WikiText2Dataset::next_batch(size_t batch_size, bool need_loop) {
                 uint8_t m = (i < sample.mask.size()) ? sample.mask[i] : 0;
                 batch_input_buffer_[b * S + i] = tok;
                 batch_attn_buffer_[b * S + i] = 1.0f;
-                batch_label_buffer_[b * S + i] = m ? tok : -100;
+                batch_label_buffer_[b * S + i] = cfg_.jsonl_full_token_labels ? tok : (m ? tok : -100);
+            }
+            if (cfg_.jsonl_full_token_labels) {
+                for (size_t i = L; i < static_cast<size_t>(S); ++i) {
+                    batch_label_buffer_[b * S + i] = batch_input_buffer_[b * S + i];
+                }
             }
         }
 

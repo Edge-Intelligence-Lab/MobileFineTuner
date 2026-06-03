@@ -8,6 +8,7 @@
 #include <string>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 
 #include "finetune_ops/graph/gpt2_model.h"
 #include "finetune_ops/graph/safetensors_loader.h"
@@ -40,10 +41,19 @@ static void usage(const char* prog) {
     cerr << "  [--out FILE] [--log_every N] [--debug 0|1]" << endl;
 }
 
+static std::filesystem::path infer_model_dir(const char* argv0) {
+    auto exe_dir = std::filesystem::absolute(argv0).parent_path();
+    if (exe_dir.filename() == "build") return exe_dir.parent_path();
+    if (exe_dir.parent_path().filename() == "build") return exe_dir.parent_path().parent_path();
+    return exe_dir.parent_path();
+}
+
 static Args parse_args(int argc, char** argv) {
     Args a;
-    a.data_root = "/Users/tony/Documents/restart/data/wikitext2/wikitext-2-raw";
-    a.pretrained_dir = "/Users/tony/Documents/restart/gpt2_lora_finetune/pretrained/gpt2";
+    const auto model_dir = infer_model_dir(argv[0]);
+    const auto repo_root = model_dir.parent_path();
+    a.data_root = (repo_root / "data/wikitext2/wikitext-2-raw").string();
+    a.pretrained_dir = (model_dir / "pretrained").string();
     
     for (int i = 1; i < argc; ++i) {
         string k = argv[i];
@@ -93,8 +103,8 @@ int main(int argc, char** argv) {
         }
         GPT2Model model(cfg);
         model.tie_weights();
-        SafeTensorsReader reader(args.pretrained_dir + "/model.safetensors");
-        reader.parse_header();
+        SafeTensorsModelReader reader(args.pretrained_dir);
+        reader.parse_headers();
         auto mapping = GPT2KeyMapper::generate_gpt2_mapping(cfg.n_layer);
         // GPT-2 safetensors weights are in [in, out] format, consistent with model internal, no transpose needed
         SafeTensorsLoadOptions load_opts;

@@ -93,7 +93,16 @@ std::vector<TensorPtr> SubBackward::apply(const TensorPtr& grad_output) {
 
 std::vector<TensorPtr> MatmulBackward::apply(const TensorPtr& grad_output) {
 
-    auto grad_a = matmul(grad_output, transpose(b_, -2, -1));
+    TensorPtr grad_a = nullptr;
+    if (a_ && a_->requires_grad()) {
+        if (b_ && b_->ndim() == 2) {
+            // Avoid materializing a full transposed copy of frozen low-precision
+            // weights; y = a @ b, so grad_a = grad_y @ b^T.
+            grad_a = matmul_rhs_T(grad_output, b_);
+        } else {
+            grad_a = matmul(grad_output, transpose(b_, -2, -1));
+        }
+    }
 
     TensorPtr grad_b = nullptr;
     if (b_ && b_->requires_grad()) {
@@ -589,9 +598,10 @@ std::vector<TensorPtr> SliceBackward::apply(const TensorPtr& grad_output) {
         int64_t steps = (d == dim_) ? length_ : input_shape[d];
         int64_t in_start = (d == dim_) ? start_ : 0;
         for (int64_t i = 0; i < steps; ++i) {
+            int64_t in_index = (d == dim_) ? (in_start + i * step_) : (in_start + i);
             scatter(d + 1,
                     out_offset + i * out_strides[d],
-                    in_offset + (in_start + i) * in_strides[d]);
+                    in_offset + in_index * in_strides[d]);
         }
     };
     scatter(0, 0, 0);
@@ -738,17 +748,18 @@ std::vector<TensorPtr> ApplyRoPEBackward::apply(const TensorPtr& grad_output) {
     const int64_t stride_head = seq_len * head_dim;
     const int64_t stride_batch = heads * stride_head;
 
+    const int64_t half_dim = head_dim / 2;
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t h = 0; h < heads; ++h) {
             for (int64_t pos = 0; pos < seq_len; ++pos) {
                 int64_t base = b * stride_batch + h * stride_head + pos * head_dim;
-                for (int64_t d = 0; d < head_dim / 2; ++d) {
+                for (int64_t d = 0; d < half_dim; ++d) {
                     float freq = 1.0f / std::pow(rope_theta_, 2.0f * static_cast<float>(d) / static_cast<float>(head_dim));
                     float angle = static_cast<float>(pos) * freq;
                     float c = std::cos(angle);
                     float s = std::sin(angle);
-                    int64_t idx1 = base + 2 * d;
-                    int64_t idx2 = base + 2 * d + 1;
+                    int64_t idx1 = base + d;
+                    int64_t idx2 = base + half_dim + d;
                     float g1p = gy[idx1];
                     float g2p = gy[idx2];
                     // grad_input = R^T * grad_output
@@ -993,7 +1004,7 @@ std::vector<TensorPtr> ApplyMaskBackward::apply(const TensorPtr& grad_output) {
 std::vector<TensorPtr> MatmulRhsTBackward::apply(const TensorPtr& grad_output) {
     // y = a @ b^T
     // grad_a = grad_y @ b
-    // grad_b = grad_y^T @ a  (then transpose back to match original b shape semantics)
+    // grad_b = sum_{leading,m} grad_y[...,m,n] * a[...,m,k]
     std::vector<TensorPtr> grads;
     TensorPtr grad_a = nullptr;
     TensorPtr grad_b = nullptr;
@@ -1001,8 +1012,30 @@ std::vector<TensorPtr> MatmulRhsTBackward::apply(const TensorPtr& grad_output) {
         grad_a = matmul(grad_output, b_);
     }
     if (b_ && b_->requires_grad()) {
-        auto grad_y_T = transpose(grad_output, -2, -1);
-        grad_b = matmul(grad_y_T, a_);
+        const auto& b_shape = b_->shape();
+        const auto& a_shape = a_->shape();
+        const auto& go_shape = grad_output->shape();
+        const int64_t n = b_shape[0];
+        const int64_t k = b_shape[1];
+        if (a_shape.back() != k || go_shape.back() != n) {
+            throw TensorError("MatmulRhsTBackward: incompatible gradient shapes");
+        }
+
+        if (a_shape.size() == 2) {
+            grad_b = matmul(transpose(grad_output, -2, -1), a_);
+        } else {
+            int64_t m = a_shape[a_shape.size() - 2];
+            int64_t leading = 1;
+            for (size_t i = 0; i + 2 < a_shape.size(); ++i) {
+                leading *= a_shape[i];
+            }
+            auto a2d = reshape(a_, {leading * m, k});
+            auto go2d = reshape(grad_output, {leading * m, n});
+            grad_b = matmul(transpose(go2d, 0, 1), a2d);
+        }
+        if (grad_b && grad_b->shape() != b_shape) {
+            throw TensorError("MatmulRhsTBackward: grad_b shape mismatch");
+        }
     }
     grads.push_back(grad_a);
     grads.push_back(grad_b);

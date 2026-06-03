@@ -1,14 +1,16 @@
-import os, json, glob, random, csv
+import os, json, glob, random, csv, sys
 from typing import List, Dict
 from transformers import GPT2TokenizerFast
+from pathlib import Path
 
-def repo_root() -> str:
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from asset_paths import resolve_mmlu_dir, resolve_model_dir, repo_root_from
 
-BASE = repo_root()
-MMLU_DATA_DIR = os.path.join(BASE, "data/mmlu/data")
+BASE = str(repo_root_from(__file__))
+MMLU_DATA_DIR = resolve_mmlu_dir(BASE)
 OUT_DIR = os.path.join(BASE, "runs/mmlu_jsonl_gpt2_medium_s128")
-MODEL_DIR = os.path.join(os.path.dirname(__file__), "pretrained")
+MODEL_DIR = resolve_model_dir("gpt2_medium", ROOT / "gpt2_medium_lora_finetune/pretrained")
 SEQ_LEN = 128
 SEED = 123
 SPLIT_RATIO = 0.9  # 90% train / 10% valid
@@ -84,5 +86,4 @@ with open(os.path.join(OUT_DIR, 'valid.jsonl'), 'w', encoding='utf-8') as f:
         f.write(json.dumps({'ids': ids, 'mask': mask}, ensure_ascii=False) + '\n')
 
 print(f"Done. train={len(train_pairs)} valid={len(valid_pairs)} out={OUT_DIR}")
-
 

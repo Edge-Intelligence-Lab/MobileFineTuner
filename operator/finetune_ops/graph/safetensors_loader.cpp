@@ -11,6 +11,9 @@
 #include <stdexcept>
 #include <regex>
 #include <cstring>
+#include <filesystem>
+#include <set>
+#include <algorithm>
 
 namespace ops {
 
@@ -130,10 +133,10 @@ TensorPtr SafeTensorsReader::load_tensor(const std::string& name, bool transpose
         throw std::runtime_error("Tensor not found: " + name);
     }
     
-    return read_tensor_data(it->second, transpose);
+    return read_tensor_data(it->second, transpose, false);
 }
 
-TensorPtr SafeTensorsReader::read_tensor_data(const SafeTensorInfo& info, bool transpose) {
+TensorPtr SafeTensorsReader::read_tensor_data(const SafeTensorInfo& info, bool transpose, bool preserve_low_precision) {
     auto fp16_to_fp32_inline = [](uint16_t h) -> float {
         uint32_t sign = (h >> 15) & 0x1;
         uint32_t exponent = (h >> 10) & 0x1F;
@@ -170,9 +173,12 @@ TensorPtr SafeTensorsReader::read_tensor_data(const SafeTensorInfo& info, bool t
     if (info.dtype == "F32") {
         element_size = 4;
         target_dtype = kFloat32;
-    } else if (info.dtype == "F16" || info.dtype == "BF16") {
+    } else if (info.dtype == "F16") {
         element_size = 2;
-        target_dtype = kFloat32;
+        target_dtype = preserve_low_precision ? kFloat16 : kFloat32;
+    } else if (info.dtype == "BF16") {
+        element_size = 2;
+        target_dtype = preserve_low_precision ? kBFloat16 : kFloat32;
     } else if (info.dtype == "I32") {
         element_size = 4;
         target_dtype = kInt32;
@@ -198,7 +204,7 @@ TensorPtr SafeTensorsReader::read_tensor_data(const SafeTensorInfo& info, bool t
     }
 
     TensorPtr tensor = std::make_shared<Tensor>(shape, target_dtype, kCPU);
-    auto transpose_buffer = [&](float* buffer) {
+    auto transpose_buffer_float = [&](float* buffer) {
         if (!need_transpose) return;
         int64_t rows = info.shape[0];
         int64_t cols = info.shape[1];
@@ -210,27 +216,62 @@ TensorPtr SafeTensorsReader::read_tensor_data(const SafeTensorInfo& info, bool t
             }
         }
     };
+    auto transpose_buffer_u16 = [&](uint16_t* buffer) {
+        if (!need_transpose) return;
+        int64_t rows = info.shape[0];
+        int64_t cols = info.shape[1];
+        std::vector<uint16_t> temp(static_cast<size_t>(numel));
+        std::memcpy(temp.data(), buffer, static_cast<size_t>(numel) * sizeof(uint16_t));
+        for (int64_t i = 0; i < rows; ++i) {
+            for (int64_t j = 0; j < cols; ++j) {
+                buffer[j * rows + i] = temp[i * cols + j];
+            }
+        }
+    };
+    auto transpose_buffer_i32 = [&](int32_t* buffer) {
+        if (!need_transpose) return;
+        int64_t rows = info.shape[0];
+        int64_t cols = info.shape[1];
+        std::vector<int32_t> temp(static_cast<size_t>(numel));
+        std::memcpy(temp.data(), buffer, static_cast<size_t>(numel) * sizeof(int32_t));
+        for (int64_t i = 0; i < rows; ++i) {
+            for (int64_t j = 0; j < cols; ++j) {
+                buffer[j * rows + i] = temp[i * cols + j];
+            }
+        }
+    };
 
     if (info.dtype == "F32") {
         std::memcpy(tensor->data<float>(), raw_data.data(), byte_size);
-        transpose_buffer(tensor->data<float>());
+        transpose_buffer_float(tensor->data<float>());
     } else if (info.dtype == "F16") {
         const uint16_t* fp16_data = reinterpret_cast<const uint16_t*>(raw_data.data());
-        float* fp32_data = tensor->data<float>();
-        for (int64_t i = 0; i < numel; ++i) {
-            fp32_data[i] = fp16_to_fp32_inline(fp16_data[i]);
+        if (target_dtype == kFloat16) {
+            std::memcpy(tensor->data<uint16_t>(), fp16_data, byte_size);
+            transpose_buffer_u16(tensor->data<uint16_t>());
+        } else {
+            float* fp32_data = tensor->data<float>();
+            for (int64_t i = 0; i < numel; ++i) {
+                fp32_data[i] = fp16_to_fp32_inline(fp16_data[i]);
+            }
+            transpose_buffer_float(fp32_data);
         }
-        transpose_buffer(fp32_data);
     } else if (info.dtype == "BF16") {
         const uint16_t* bf16_data = reinterpret_cast<const uint16_t*>(raw_data.data());
-        float* fp32_data = tensor->data<float>();
-        for (int64_t i = 0; i < numel; ++i) {
-            uint32_t bits = static_cast<uint32_t>(bf16_data[i]) << 16;
-            std::memcpy(&fp32_data[i], &bits, sizeof(float));
+        if (target_dtype == kBFloat16) {
+            std::memcpy(tensor->data<uint16_t>(), bf16_data, byte_size);
+            transpose_buffer_u16(tensor->data<uint16_t>());
+        } else {
+            float* fp32_data = tensor->data<float>();
+            for (int64_t i = 0; i < numel; ++i) {
+                uint32_t bits = static_cast<uint32_t>(bf16_data[i]) << 16;
+                std::memcpy(&fp32_data[i], &bits, sizeof(float));
+            }
+            transpose_buffer_float(fp32_data);
         }
-        transpose_buffer(fp32_data);
     } else if (info.dtype == "I32") {
         std::memcpy(tensor->data<int32_t>(), raw_data.data(), byte_size);
+        transpose_buffer_i32(tensor->data<int32_t>());
     }
 
     return tensor;
@@ -262,7 +303,19 @@ SafeTensorsReader::load_tensors_mapped(
                         !is_embedding &&
                         it->second.shape.size() == 2;
         
-        auto tensor = read_tensor_data(it->second, transpose);
+        bool preserve_low_precision = !options.auto_promote_fp16;
+        if (options.auto_promote_fp16) {
+            for (const auto& needle : options.preserve_low_precision_key_substrings) {
+                if ((!needle.empty()) &&
+                    (internal_key.find(needle) != std::string::npos ||
+                     hf_key.find(needle) != std::string::npos)) {
+                    preserve_low_precision = true;
+                    break;
+                }
+            }
+        }
+
+        auto tensor = read_tensor_data(it->second, transpose, preserve_low_precision);
         result[internal_key] = tensor;
         
         if (options.verbose) {
@@ -278,6 +331,134 @@ SafeTensorsReader::load_tensors_mapped(
         }
     }
     
+    return result;
+}
+
+// ============================================================================
+// SafeTensorsModelReader implementation
+// ============================================================================
+
+SafeTensorsModelReader::SafeTensorsModelReader(const std::string& model_dir_or_file)
+    : model_dir_or_file_(model_dir_or_file) {}
+
+std::vector<std::string> SafeTensorsModelReader::resolve_weight_files(const std::string& model_dir_or_file) {
+    namespace fs = std::filesystem;
+
+    fs::path input(model_dir_or_file);
+    if (fs::is_regular_file(input)) {
+        return {input.string()};
+    }
+    if (!fs::is_directory(input)) {
+        throw std::runtime_error("SafeTensors path is neither file nor directory: " + model_dir_or_file);
+    }
+
+    fs::path single = input / "model.safetensors";
+    if (fs::is_regular_file(single)) {
+        return {single.string()};
+    }
+
+    fs::path index = input / "model.safetensors.index.json";
+    if (fs::is_regular_file(index)) {
+        std::ifstream f(index);
+        if (!f.is_open()) {
+            throw std::runtime_error("Cannot open SafeTensors index: " + index.string());
+        }
+        std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        std::regex shard_pattern(R"#("([^"]+)"\s*:\s*"([^"]+\.safetensors)")#");
+        std::set<std::string> unique_names;
+        auto begin = std::sregex_iterator(json.begin(), json.end(), shard_pattern);
+        auto end = std::sregex_iterator();
+        for (auto it = begin; it != end; ++it) {
+            unique_names.insert((*it)[2].str());
+        }
+        if (unique_names.empty()) {
+            throw std::runtime_error("SafeTensors index contains no shard filenames: " + index.string());
+        }
+
+        std::vector<std::string> files;
+        for (const auto& name : unique_names) {
+            fs::path shard = input / name;
+            if (!fs::is_regular_file(shard)) {
+                throw std::runtime_error("SafeTensors shard listed in index is missing: " + shard.string());
+            }
+            files.push_back(shard.string());
+        }
+        return files;
+    }
+
+    std::vector<std::string> fallback_shards;
+    for (const auto& entry : fs::directory_iterator(input)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".safetensors") {
+            fallback_shards.push_back(entry.path().string());
+        }
+    }
+    std::sort(fallback_shards.begin(), fallback_shards.end());
+    if (!fallback_shards.empty()) {
+        return fallback_shards;
+    }
+
+    throw std::runtime_error(
+        "No SafeTensors weights found in " + model_dir_or_file +
+        ". Expected model.safetensors or model.safetensors.index.json with shard files.");
+}
+
+void SafeTensorsModelReader::parse_headers() {
+    files_ = resolve_weight_files(model_dir_or_file_);
+    readers_.clear();
+    tensor_to_reader_.clear();
+
+    for (const auto& file : files_) {
+        auto reader = std::make_unique<SafeTensorsReader>(file);
+        reader->parse_header();
+        size_t reader_index = readers_.size();
+        for (const auto& name : reader->get_tensor_names()) {
+            auto inserted = tensor_to_reader_.emplace(name, reader_index);
+            if (!inserted.second) {
+                throw std::runtime_error("Duplicate tensor key across SafeTensors shards: " + name);
+            }
+        }
+        readers_.push_back(std::move(reader));
+    }
+}
+
+std::vector<std::string> SafeTensorsModelReader::get_tensor_names() const {
+    std::vector<std::string> names;
+    names.reserve(tensor_to_reader_.size());
+    for (const auto& kv : tensor_to_reader_) {
+        names.push_back(kv.first);
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+std::unordered_map<std::string, TensorPtr>
+SafeTensorsModelReader::load_tensors_mapped(
+    const std::unordered_map<std::string, std::string>& key_mapping,
+    const SafeTensorsLoadOptions& options) {
+    if (readers_.empty()) {
+        throw std::logic_error("SafeTensorsModelReader::parse_headers must be called before loading tensors");
+    }
+
+    std::vector<std::unordered_map<std::string, std::string>> grouped(readers_.size());
+    for (const auto& [internal_key, hf_key] : key_mapping) {
+        auto it = tensor_to_reader_.find(hf_key);
+        if (it == tensor_to_reader_.end()) {
+            if (options.verbose) {
+                std::cerr << "[WARN] HF key not found in SafeTensors model: " << hf_key << std::endl;
+            }
+            continue;
+        }
+        grouped[it->second][internal_key] = hf_key;
+    }
+
+    std::unordered_map<std::string, TensorPtr> result;
+    for (size_t i = 0; i < readers_.size(); ++i) {
+        if (grouped[i].empty()) {
+            continue;
+        }
+        auto partial = readers_[i]->load_tensors_mapped(grouped[i], options);
+        result.insert(partial.begin(), partial.end());
+    }
     return result;
 }
 

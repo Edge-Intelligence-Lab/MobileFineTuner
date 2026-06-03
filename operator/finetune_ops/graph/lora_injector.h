@@ -149,6 +149,8 @@ public:
      * @return List of all LoRA parameters
      */
     std::vector<TensorPtr> get_trainable_params();
+
+    const LoraSpec& spec() const { return spec_; }
     
     /**
      * @brief LoRA-augmented linear forward (wrapper)
@@ -181,6 +183,7 @@ private:
     LoraSpec spec_;
     bool merged_ = false;
     int num_layers_ = 0;
+    GPT2Model* model_ = nullptr;
     
     // Internal helpers
     void inject_qkv_split(GPT2Model& model, int layer_idx, int rank, float alpha, float dropout);
@@ -191,4 +194,3 @@ private:
 };
 
 }  // namespace ops
-

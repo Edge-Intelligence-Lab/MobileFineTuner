@@ -31,6 +31,7 @@ struct TrainerConfig {
     
     // Training
     int num_epochs = 3;
+    int micro_batch_size = 1;
     int gradient_accumulation_steps = 1;
     float max_grad_norm = 1.0f;      // clip_grad_norm
     
@@ -81,10 +82,11 @@ private:
     
     std::unique_ptr<Adam> optimizer_;
     int global_step_;
+    int accum_counter_ = 0;
+    float accum_loss_ = 0.0f;
     
     float get_lr(int step);  // LR scheduler
     void clip_gradients();
 };
 
 }  // namespace ops
-

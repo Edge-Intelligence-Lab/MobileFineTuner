@@ -6,8 +6,9 @@
 #pragma once
 
 #include "../core/tensor.h"
-#include <vector>
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace ops {
 
@@ -89,6 +90,7 @@ private:
     TensorPtr b_;  // [out_dim]
     std::vector<LoRASlice> slices_;
     bool merged_;
+    std::vector<uint8_t> merge_backup_;
     std::string debug_name_;
 };
 

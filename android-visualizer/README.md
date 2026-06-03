@@ -218,8 +218,7 @@ android-visualizer/
 │   └── screenshots/                     # UI screenshots for README
 ├── scripts/
 │   └── qa/                              # One-click device QA script
-└── verification/
-    └── device_qa_release_latest/        # Reference screenshots + QA report
+└── README.md
 ```
 
 ---
@@ -242,19 +241,21 @@ Run a full on-device acceptance pass (build, install, auto tab switching, video 
 
 ```bash
 ./scripts/qa/mobile_device_qa.sh \
-  --out-dir verification/device_qa_release_latest \
+  --out-dir /tmp/mobilefinetuner-device-qa \
   --video-seconds 36 \
   --shot-interval 4
 ```
 
 Outputs:
 
-- `verification/device_qa_release_latest/QA_REPORT.txt`
+- `QA_REPORT.txt`
 - Full-tab screenshots (`Home`, `Train`, `Versus`, `Logs`, `Runs`)
 - Focus-state screenshots (filter input, step focus, chart interactions)
 - One MP4 session recording
 
 Use this before every release tag to keep acceptance artifacts reproducible.
+Generated QA media should stay in a local or CI artifact directory, not in the
+source tree.
 
 ---
 

@@ -5,6 +5,7 @@
 #include "finetune_ops/core/tokenizer_gemma.h"
 #include "finetune_ops/core/lm_loss.h"
 #include "finetune_ops/core/ops.h"
+#include "finetune_ops/optim/smoke_utils.h"
 #include "finetune_ops/data/wikitext2_dataset.h"
 #include <iostream>
 #include <unordered_map>
@@ -190,6 +191,9 @@ struct CliOptions {
     std::string align_numeric_targets = "attn_out_raw_l0";
     std::string target_mode = "full";
     std::string lora_targets_override;
+    int rank = 8;
+    float alpha = 32.0f;
+    float lora_dropout = 0.0f;
     int epochs = 1;
     int max_steps = -1;
     int seq_len = 256;
@@ -206,6 +210,8 @@ struct CliOptions {
     int dump_embedding_step = 1;
     std::string dump_embedding_dir = "./debug";
     int preview_tokens = 0;
+    bool synthetic_smoke = false;
+    int smoke_steps = 2;
 };
 
 CliOptions parse_cli(int argc, char** argv) {
@@ -268,6 +274,14 @@ CliOptions parse_cli(int argc, char** argv) {
             opts.grad_accum = std::stoi(get_val("--grad_accum"));
         } else if (arg.rfind("--lr", 0) == 0) {
             opts.learning_rate = std::stof(get_val("--lr"));
+        } else if (arg.rfind("--learning_rate", 0) == 0) {
+            opts.learning_rate = std::stof(get_val("--learning_rate"));
+        } else if (arg.rfind("--rank", 0) == 0) {
+            opts.rank = std::stoi(get_val("--rank"));
+        } else if (arg.rfind("--alpha", 0) == 0) {
+            opts.alpha = std::stof(get_val("--alpha"));
+        } else if (arg.rfind("--lora_dropout", 0) == 0) {
+            opts.lora_dropout = std::stof(get_val("--lora_dropout"));
         } else if (arg.rfind("--warmup_ratio", 0) == 0) {
             opts.warmup_ratio = std::stof(get_val("--warmup_ratio"));
         } else if (arg.rfind("--max_grad_norm", 0) == 0) {
@@ -298,14 +312,142 @@ CliOptions parse_cli(int argc, char** argv) {
             opts.align_numeric_count = std::stoi(get_val("--align_numeric_count"));
         } else if (arg.rfind("--align_numeric_targets", 0) == 0) {
             opts.align_numeric_targets = get_val("--align_numeric_targets");
+        } else if (arg == "--synthetic_smoke") {
+            opts.synthetic_smoke = true;
+        } else if (arg.rfind("--smoke_steps", 0) == 0) {
+            opts.smoke_steps = std::stoi(get_val("--smoke_steps"));
         }
     }
     return opts;
 }
 
+static void require_file(const std::string& path, const std::string& desc) {
+    if (!std::filesystem::exists(path)) {
+        throw std::runtime_error(desc + " not found: " + path);
+    }
+}
+
+static GemmaLoraSpec build_lora_spec(const CliOptions& cli) {
+    GemmaLoraSpec lora_spec = GemmaLoraSpec::full_attn_mlp();
+    lora_spec.rank = cli.rank;
+    lora_spec.alpha = cli.alpha;
+    lora_spec.dropout = cli.lora_dropout;
+    if (cli.target_mode == "light") {
+        lora_spec = GemmaLoraSpec::attention_light();
+        lora_spec.rank = cli.rank;
+        lora_spec.alpha = cli.alpha;
+        lora_spec.dropout = cli.lora_dropout;
+    } else if (cli.target_mode == "attn") {
+        lora_spec = GemmaLoraSpec::attention_only();
+        lora_spec.rank = cli.rank;
+        lora_spec.alpha = cli.alpha;
+        lora_spec.dropout = cli.lora_dropout;
+    }
+    if (!cli.lora_targets_override.empty()) {
+        lora_spec.target_modules.clear();
+        std::stringstream ss(cli.lora_targets_override);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+            if (!tok.empty()) {
+                lora_spec.target_modules.push_back(tok);
+            }
+        }
+    }
+    if (!cli.align_dump_dir.empty()) {
+        lora_spec.dropout = 0.0f;
+    }
+    return lora_spec;
+}
+
+static int run_synthetic_smoke(const CliOptions& cli) {
+    std::cout << "========== Gemma LoRA Synthetic Smoke ==========\n" << std::endl;
+
+    GemmaTextConfig cfg;
+    cfg.vocab_size = 64;
+    cfg.hidden_size = 16;
+    cfg.intermediate_size = 32;
+    cfg.num_hidden_layers = 2;
+    cfg.num_attention_heads = 2;
+    cfg.num_key_value_heads = 1;
+    cfg.head_dim = 8;
+    cfg.max_position_embeddings = std::max(32, cli.seq_len + 4);
+    cfg.sliding_window = 16;
+    cfg.layer_types.assign(cfg.num_hidden_layers, "sliding_attention");
+
+    GemmaModel model(cfg);
+    std::mt19937 rng(42);
+    smoke::initialize_tiny_gemma(model, rng);
+
+    GemmaLoraInjector injector;
+    auto lora_spec = build_lora_spec(cli);
+    lora_spec.dropout = 0.0f;
+    injector.inject(model, lora_spec);
+    auto trainable = injector.get_trainable_params();
+    if (trainable.empty()) {
+        throw std::runtime_error("synthetic smoke created no trainable Gemma LoRA parameters");
+    }
+
+    auto before = smoke::clone_tensors(trainable);
+    const int batch = std::max(1, std::min(cli.batch, 2));
+    const int seq_len = std::max(4, std::min(cli.seq_len, 8));
+    auto input_ids = smoke::make_input_ids(batch, seq_len, cfg.vocab_size, 1);
+    auto labels = smoke::make_shifted_labels(input_ids, cfg.vocab_size);
+    auto attention_mask = smoke::make_attention_mask(batch, seq_len);
+
+    AdamConfig opt_cfg;
+    opt_cfg.learning_rate = std::max(cli.learning_rate, 1e-2f);
+    Adam optimizer(opt_cfg);
+
+    const int smoke_steps = std::max(1, cli.smoke_steps);
+    for (int step = 0; step < smoke_steps; ++step) {
+        auto logits = model.forward(input_ids, attention_mask);
+        auto loss = lm_cross_entropy(logits, labels, -100, cli.loss_reduction);
+        if (!smoke::is_finite_scalar(loss)) {
+            throw std::runtime_error("non-finite loss during Gemma synthetic smoke");
+        }
+        loss->backward();
+
+        std::vector<TensorPtr> grads;
+        grads.reserve(trainable.size());
+        for (const auto& param : trainable) {
+            grads.push_back(param->grad());
+        }
+        double grad_norm = smoke::grad_l2_norm(grads);
+        if (!(grad_norm > 0.0) || !std::isfinite(grad_norm)) {
+            throw std::runtime_error("invalid gradient norm during Gemma synthetic smoke");
+        }
+
+        optimizer.step(trainable, grads);
+        smoke::zero_grads(trainable);
+        smoke::cleanup_step_memory();
+
+        std::cout << "[smoke step " << (step + 1) << "/" << smoke_steps
+                  << "] loss=" << loss->data<float>()[0]
+                  << " grad_norm=" << grad_norm << std::endl;
+    }
+
+    double param_delta = smoke::max_param_delta(before, trainable);
+    std::filesystem::create_directories(cli.output_dir);
+    injector.save_lora_safetensors(cli.output_dir + "/gemma_lora_smoke.safetensors");
+    std::cout << "[SyntheticSmoke] param_delta=" << param_delta << std::endl;
+    const bool ok = std::isfinite(param_delta) && param_delta > 0.0;
+    std::cout << (ok ? "[PASS]" : "[FAIL]") << std::endl;
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     try {
         auto cli = parse_cli(argc, argv);
+        if (cli.synthetic_smoke) {
+            return run_synthetic_smoke(cli);
+        }
+
+        require_file(cli.model_dir + "/config.json", "Gemma config");
+        if (cli.jsonl_train.empty() && cli.jsonl_valid.empty() && cli.jsonl_test.empty() &&
+            cli.pretokenized_path.empty()) {
+            require_file(cli.data_dir + "/wiki.train.raw", "WikiText-2 train split");
+            require_file(cli.data_dir + "/wiki.valid.raw", "WikiText-2 valid split");
+        }
 
         std::cout << "========== Gemma LoRA Finetune ==========\n" << std::endl;
         std::cout << "[INFO] model_dir=" << cli.model_dir << std::endl;
@@ -329,8 +471,8 @@ int main(int argc, char** argv) {
             model.set_debug_retain_grads(false);
         }
 
-        SafeTensorsReader reader(cli.model_dir + "/model.safetensors");
-        reader.parse_header();
+        SafeTensorsModelReader reader(cli.model_dir);
+        reader.parse_headers();
         auto mapping = GemmaKeyMapper::generate_gemma_mapping(cfg.num_hidden_layers);
         SafeTensorsLoadOptions load_opts;
         load_opts.verbose = false;
@@ -357,23 +499,7 @@ int main(int argc, char** argv) {
             };
         }
 
-        GemmaLoraSpec lora_spec = GemmaLoraSpec::full_attn_mlp();
-        if (cli.target_mode == "light") {
-            lora_spec = GemmaLoraSpec::attention_light();
-        } else if (cli.target_mode == "attn") {
-            lora_spec = GemmaLoraSpec::attention_only();
-        }
-        if (!cli.lora_targets_override.empty()) {
-            lora_spec.target_modules.clear();
-            std::stringstream ss(cli.lora_targets_override);
-            std::string tok;
-            while (std::getline(ss, tok, ',')) {
-                if (!tok.empty()) lora_spec.target_modules.push_back(tok);
-            }
-        }
-        if (!cli.align_dump_dir.empty()) {
-            lora_spec.dropout = 0.0f;
-        }
+        GemmaLoraSpec lora_spec = build_lora_spec(cli);
         GemmaLoraInjector injector;
         injector.inject(model, lora_spec);
         injector.print_info();
@@ -705,5 +831,3 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
-
-

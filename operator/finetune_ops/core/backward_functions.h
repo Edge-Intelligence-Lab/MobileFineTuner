@@ -230,9 +230,10 @@ private:
     int dim_;
     int64_t start_;
     int64_t length_;
+    int64_t step_;
 public:
-    SliceBackward(const TensorPtr& input, int dim, int64_t start, int64_t length)
-        : input_(input), dim_(dim), start_(start), length_(length) {}
+    SliceBackward(const TensorPtr& input, int dim, int64_t start, int64_t length, int64_t step = 1)
+        : input_(input), dim_(dim), start_(start), length_(length), step_(step) {}
     std::vector<TensorPtr> apply(const TensorPtr& grad_output) override;
 };
 

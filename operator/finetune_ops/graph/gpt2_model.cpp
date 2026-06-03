@@ -458,7 +458,7 @@ TensorPtr GPT2Model::gelu_new(const TensorPtr& x) {
 }
 
 // ============================================================================
-// Helper functions (TODO: these basic ops require implementations)
+// Helper functions
 // ============================================================================
 
 TensorPtr GPT2Model::embedding_lookup(const TensorPtr& weight, const TensorPtr& indices) {
@@ -610,7 +610,10 @@ TensorPtr GPT2Model::forward_block(const TensorPtr& x_in,
     // ========== Attention computation: memory-efficient vs standard ==========
     TensorPtr context;
     
-    if (config_.use_memory_efficient_attention) {
+    // The streamed kernel only supports the causal mask path today.
+    // Padded batches must stay on the standard implementation so padding scores
+    // are masked correctly.
+    if (config_.use_memory_efficient_attention && !pad_mask) {
         // 🚀 Memory-efficient attention: streamed softmax without materializing S×S
         // Memory cost: O(B·H·S·D) vs standard O(B·H·S²)
         MemoryEfficientAttentionConfig attn_config;

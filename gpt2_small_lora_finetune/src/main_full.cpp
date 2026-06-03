@@ -79,8 +79,14 @@ static void print_usage(const char* prog) {
 
 static CmdArgs parse_args(int argc, char** argv) {
     CmdArgs args;
-    args.data_dir = "/Users/tony/Documents/restart/data/wikitext2/wikitext-2-raw";
-    args.pretrained_dir = "/Users/tony/Documents/restart/gpt2_lora_finetune/pretrained/gpt2";
+    auto exe_dir = std::filesystem::absolute(argv[0]).parent_path();
+    auto model_dir = exe_dir.filename() == "build" ? exe_dir.parent_path()
+                                                   : (exe_dir.parent_path().filename() == "build"
+                                                      ? exe_dir.parent_path().parent_path()
+                                                      : exe_dir.parent_path());
+    auto repo_root = model_dir.parent_path();
+    args.data_dir = (repo_root / "data/wikitext2/wikitext-2-raw").string();
+    args.pretrained_dir = (model_dir / "pretrained").string();
 
     for (int i = 1; i < argc; ++i) {
         string k = argv[i];
@@ -300,11 +306,11 @@ int main(int argc, char** argv) {
         model.tie_weights();
 
         const string weight_path = args.resume_from.empty()
-            ? args.pretrained_dir + "/model.safetensors"
+            ? args.pretrained_dir
             : args.resume_from;
 
-        SafeTensorsReader reader(weight_path);
-        reader.parse_header();
+        SafeTensorsModelReader reader(weight_path);
+        reader.parse_headers();
         auto key_map = GPT2KeyMapper::generate_gpt2_mapping(cfg.n_layer);
         SafeTensorsLoadOptions load_opts;
         load_opts.transpose_linear = false;  // HF GPT-2 weights already in [in,out] format

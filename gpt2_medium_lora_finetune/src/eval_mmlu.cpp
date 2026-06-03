@@ -73,18 +73,15 @@ int main(int argc, char** argv) {
         GPT2Config cfg = GPT2Config::from_pretrained(args.pretrained_dir + "/config.json");
         GPT2Model model(cfg);
         model.tie_weights();
-        SafeTensorsReader reader(args.pretrained_dir + "/model.safetensors");
-        reader.parse_header();
+        SafeTensorsModelReader reader(args.pretrained_dir);
+        reader.parse_headers();
         auto mapping = GPT2KeyMapper::generate_gpt2_mapping(cfg.n_layer);
-        for (const auto& kv : mapping) {
-            const string& ik = kv.first; const string& hk = kv.second;
-            try {
-                auto info = reader.get_tensor_info(hk);
-                if (!info.dtype.empty()) {
-                    auto t = reader.load_tensor(hk, false);
-                    model.assign_weight(ik, t);
-                }
-            } catch (...) {}
+        SafeTensorsLoadOptions load_opts;
+        load_opts.transpose_linear = false;
+        load_opts.verbose = false;
+        auto loaded = reader.load_tensors_mapped(mapping, load_opts);
+        for (const auto& kv : loaded) {
+            model.assign_weight(kv.first, kv.second);
         }
 
         LoraInjector injector;
@@ -146,5 +143,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
-
 

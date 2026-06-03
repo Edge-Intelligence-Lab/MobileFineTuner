@@ -11,6 +11,39 @@
 
 namespace ops {
 
+namespace {
+
+TensorPtr build_causal_mask_if_needed(int64_t seq_len, bool use_causal_mask, const Device& device) {
+    if (!use_causal_mask) {
+        return nullptr;
+    }
+    return create_causal_mask(static_cast<int>(seq_len), kFloat32, device);
+}
+
+TensorPtr standard_attention_fallback(const TensorPtr& q,
+                                      const TensorPtr& k,
+                                      const TensorPtr& v,
+                                      const TensorPtr& causal_mask,
+                                      float scale,
+                                      bool use_causal_mask) {
+    auto k_t = transpose(k, 2, 3);
+    auto scores = mul(matmul(q, k_t), scale);
+
+    if (causal_mask) {
+        scores = add(scores, causal_mask);
+    } else {
+        auto generated_mask = build_causal_mask_if_needed(q->shape()[2], use_causal_mask, q->device());
+        if (generated_mask) {
+            scores = add(scores, generated_mask);
+        }
+    }
+
+    auto probs = softmax(scores, -1);
+    return matmul(probs, v);
+}
+
+}  // namespace
+
 void online_softmax_weighted_sum(
     const float* logits,
     const float* values,
@@ -68,6 +101,11 @@ TensorPtr memory_efficient_attention(
     
     // Auto-compute scale factor
     float scale = (config.scale > 0) ? config.scale : (1.0f / std::sqrt(static_cast<float>(head_dim)));
+
+    // Safety first: preserve correct gradients during training.
+    if (q->requires_grad() || k->requires_grad() || v->requires_grad()) {
+        return standard_attention_fallback(q, k, v, causal_mask, scale, config.use_causal_mask);
+    }
     
     // Prepare causal mask (if provided)
     const float* mask_data = nullptr;
@@ -161,28 +199,7 @@ TensorPtr memory_efficient_attention(
         }
     }
     
-    // Enable gradient propagation if needed
-    if (q->requires_grad() || k->requires_grad() || v->requires_grad()) {
-        context->set_requires_grad(true);
-        
-        // TODO: implement backward for memory-efficient attention
-        // Current strategy: fall back to standard attention or manual grads when training
-        // Full implementation needs max_score/sum_exp saved or recomputed in backward
-        context->set_grad_fn([q, k, v, causal_mask, scale](const TensorPtr& grad_output) -> std::vector<TensorPtr> {
-            // Placeholder: notify user that full backward is needed
-            std::cerr << "[WARN] memory_efficient_attention backward not fully implemented yet" << std::endl;
-            
-            // Return zero grads for now (implement full backward or switch to standard attention when needed)
-            auto grad_q = zeros(q->shape(), q->dtype(), q->device());
-            auto grad_k = zeros(k->shape(), k->dtype(), k->device());
-            auto grad_v = zeros(v->shape(), v->dtype(), v->device());
-            
-            return {grad_q, grad_k, grad_v};
-        });
-    }
-    
     return context;
 }
 
 } // namespace ops
-

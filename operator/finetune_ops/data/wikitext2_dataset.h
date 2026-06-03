@@ -37,6 +37,7 @@ struct WT2Config {
     bool drop_last = true;     // train=true; valid can set false to keep tail
     uint64_t seed = 2025;      // RNG seed for shuffling/sampling
     bool shuffle_train = true; // shuffle training order
+    bool jsonl_full_token_labels = false; // JSONL mode: supervise every shifted token instead of mask-only labels
     
     // Streaming load (memory friendly)
     bool streaming_mode = true;       // stream tokens instead of loading all
@@ -141,7 +142,7 @@ private:
                                      std::vector<uint8_t>& mask_out);
 
     WT2Config cfg_;
-    GPT2BPETokenizer* tok_;   // non-owning pointer
+    GPT2BPETokenizer* tok_ [[maybe_unused]];   // non-owning pointer
     std::function<std::vector<int32_t>(const std::string&)> encode_fn_;
 
     // Streaming mode state

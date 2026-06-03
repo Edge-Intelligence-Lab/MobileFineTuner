@@ -7,12 +7,31 @@
 #include "../core/ops.h"
 #include "../core/utils.h"
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <regex>
+#include <random>
 #include <sstream>
 #include <vector>
 
 namespace ops {
+
+namespace {
+
+float qwen_weight_value(const TensorPtr& weight, int64_t idx) {
+    if (weight->dtype() == kFloat32) {
+        return weight->data<float>()[idx];
+    }
+    if (weight->dtype() == kFloat16) {
+        return fp16_bits_to_float32(weight->data<uint16_t>()[idx]);
+    }
+    if (weight->dtype() == kBFloat16) {
+        return bf16_bits_to_float32(weight->data<uint16_t>()[idx]);
+    }
+    throw std::runtime_error("QwenModel: unsupported weight dtype " + DTypeUtils::to_string(weight->dtype()));
+}
+
+} // namespace
 
 // -------------- Config loader (minimal JSON parsing) --------------
 QwenConfig QwenConfig::from_pretrained(const std::string& path) {
@@ -111,8 +130,10 @@ void QwenModel::assign_weight(const std::string& key, const TensorPtr& tensor) {
 }
 
 // -------------- LoRA --------------
-void QwenModel::init_lora(int rank, float alpha, float dropout, bool qv_only) {
+void QwenModel::init_lora(int rank, float alpha, float dropout [[maybe_unused]], bool qv_only, uint64_t seed) {
     float scale = alpha / rank;
+    std::mt19937 rng(static_cast<uint32_t>(seed));
+    std::uniform_real_distribution<float> init_dist(-0.01f, 0.01f);
     for (auto& b : layers_) {
         if (b.lora_initialized) continue;
         
@@ -130,10 +151,11 @@ void QwenModel::init_lora(int rank, float alpha, float dropout, bool qv_only) {
             auto B = std::make_shared<Tensor>(std::vector<int64_t>{rank, out_dim}, kFloat32, kCPU);
             A->set_requires_grad(true); B->set_requires_grad(true);
             // init A ~ U(-0.01,0.01), B=0
-            auto tmpA = uniform({in_dim, rank}, -0.01f, 0.01f, kFloat32, kCPU);
-            std::memcpy(A->data<void>(), tmpA->data<void>(), sizeof(float) * in_dim * rank);
-            std::vector<float> zeros(rank * out_dim, 0.0f);
-            std::memcpy(B->data<void>(), zeros.data(), sizeof(float) * rank * out_dim);
+            float* a_data = A->data<float>();
+            for (int64_t i = 0; i < in_dim * rank; ++i) {
+                a_data[i] = init_dist(rng);
+            }
+            std::memset(B->data<void>(), 0, sizeof(float) * rank * out_dim);
             return {A, B};
         };
         
@@ -182,6 +204,28 @@ std::vector<TensorPtr> QwenModel::get_lora_parameters() const {
     return params;
 }
 
+std::vector<TensorPtr> QwenModel::parameters() const {
+    std::vector<TensorPtr> params;
+    params.reserve(2 + static_cast<size_t>(config_.num_hidden_layers) * 12);
+    params.push_back(embed_tokens_);
+    params.push_back(final_norm_weight_);
+    for (const auto& b : layers_) {
+        params.push_back(b.input_norm_weight);
+        params.push_back(b.post_norm_weight);
+        params.push_back(b.q_proj_weight);
+        params.push_back(b.q_proj_bias);
+        params.push_back(b.k_proj_weight);
+        params.push_back(b.k_proj_bias);
+        params.push_back(b.v_proj_weight);
+        params.push_back(b.v_proj_bias);
+        params.push_back(b.o_proj_weight);
+        params.push_back(b.gate_proj_weight);
+        params.push_back(b.up_proj_weight);
+        params.push_back(b.down_proj_weight);
+    }
+    return params;
+}
+
 void QwenModel::freeze_base() {
     auto freeze = [](const TensorPtr& t) {
         if (t) t->set_requires_grad(false);
@@ -208,13 +252,20 @@ TensorPtr QwenModel::embedding_lookup(const TensorPtr& weight, const TensorPtr& 
     int64_t B = shape[0], S = shape[1], H = weight->shape()[1];
     auto out = zeros({B, S, H}, kFloat32, kCPU);
     const int32_t* idx = indices->data<int32_t>();
-    const float* w = weight->data<float>();
     float* o = out->data<float>();
     for (int64_t b = 0; b < B; ++b) {
         for (int64_t s = 0; s < S; ++s) {
             int32_t id = idx[b * S + s];
-            const float* src = w + id * H;
-            std::memcpy(o + (b * S + s) * H, src, sizeof(float) * H);
+            float* dst = o + (b * S + s) * H;
+            if (weight->dtype() == kFloat32) {
+                const float* src = weight->data<float>() + id * H;
+                std::memcpy(dst, src, sizeof(float) * H);
+            } else {
+                const int64_t base = static_cast<int64_t>(id) * H;
+                for (int64_t h = 0; h < H; ++h) {
+                    dst[h] = qwen_weight_value(weight, base + h);
+                }
+            }
         }
     }
     return out;
@@ -226,7 +277,7 @@ TensorPtr QwenModel::build_causal_mask(int seq_len) {
 
 TensorPtr QwenModel::attention(const TensorPtr& x, QwenBlock& blk,
                                const TensorPtr& causal_mask,
-                               const TensorPtr& pad_mask, int64_t seq_len) {
+                               const TensorPtr& pad_mask, int64_t seq_len [[maybe_unused]]) {
     int64_t B = x->shape()[0];
     int64_t S = x->shape()[1];
     int64_t C = x->shape()[2];
@@ -281,7 +332,7 @@ TensorPtr QwenModel::mlp(const TensorPtr& x, QwenBlock& blk) {
 }
 
 // -------------- 前向 --------------
-TensorPtr QwenModel::forward(const TensorPtr& input_ids, const TensorPtr& attention_mask) {
+TensorPtr QwenModel::forward_hidden(const TensorPtr& input_ids, const TensorPtr& attention_mask) {
     auto x = embedding_lookup(embed_tokens_, input_ids); // [B,S,H]
 
     TensorPtr pad_mask = nullptr;
@@ -316,10 +367,10 @@ TensorPtr QwenModel::forward(const TensorPtr& input_ids, const TensorPtr& attent
 
     for (int i = 0; i < config_.num_hidden_layers; ++i) {
         auto& blk = layers_[i];
-        auto normed = rms_norm(x, blk.input_norm_weight, config_.rms_norm_eps);
+        auto normed = rms_norm_affine(x, blk.input_norm_weight, config_.rms_norm_eps);
         auto attn_out = attention(normed, blk, causal_mask, pad_mask, x->shape()[1]);
         x = add(x, attn_out);
-        auto normed2 = rms_norm(x, blk.post_norm_weight, config_.rms_norm_eps);
+        auto normed2 = rms_norm_affine(x, blk.post_norm_weight, config_.rms_norm_eps);
         auto mlp_out = mlp(normed2, blk);
         x = add(x, mlp_out);
 
@@ -330,10 +381,16 @@ TensorPtr QwenModel::forward(const TensorPtr& input_ids, const TensorPtr& attent
             tensor_stats(mlp_out, "mlp_out");
         }
     }
-    x = rms_norm(x, final_norm_weight_, config_.rms_norm_eps);
-    auto wte_t = transpose(embed_tokens_, 0, 1); // [hidden, vocab]
-    auto logits = matmul(x, wte_t); // [B,S,hidden] @ [hidden,vocab] -> [B,S,vocab]
-    return logits;
+    x = rms_norm_affine(x, final_norm_weight_, config_.rms_norm_eps);
+    return x;
+}
+
+TensorPtr QwenModel::lm_head(const TensorPtr& hidden) {
+    return matmul_rhs_T(hidden, embed_tokens_); // [B,S,H] @ [V,H]^T -> [B,S,V]
+}
+
+TensorPtr QwenModel::forward(const TensorPtr& input_ids, const TensorPtr& attention_mask) {
+    return lm_head(forward_hidden(input_ids, attention_mask));
 }
 
 } // namespace ops

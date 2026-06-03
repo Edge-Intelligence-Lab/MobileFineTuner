@@ -43,15 +43,7 @@ namespace {
      * @return Size in bytes
      */
     size_t dtype_size(DType dtype) {
-        switch (dtype) {
-            case kFloat32: return sizeof(float);
-            case kFloat16: return sizeof(uint16_t);
-            case kInt32: return sizeof(int32_t);
-            case kInt64: return sizeof(int64_t);
-            case kInt8: return sizeof(int8_t);
-            case kBool: return sizeof(bool);
-            default: return sizeof(float);
-        }
+        return DTypeUtils::size_of(dtype);
     }
 
     void validate_shape(const std::vector<int64_t>& shape) {
@@ -316,8 +308,14 @@ TensorPtr Tensor::transpose(int dim0, int dim1) const {
 
     auto result = std::make_shared<Tensor>(new_shape, dtype_, device_);
 
-    const float* src_data = data<float>();
-    float* dst_data = result->data<float>();
+    const size_t elem_size = dtype_size(dtype_);
+    const char* src_data = static_cast<const char*>(data_);
+    char* dst_data = static_cast<char*>(result->data_ptr());
+    auto copy_element = [&](int64_t dst_idx, int64_t src_idx) {
+        std::memcpy(dst_data + static_cast<size_t>(dst_idx) * elem_size,
+                    src_data + static_cast<size_t>(src_idx) * elem_size,
+                    elem_size);
+    };
 
     if (ndim() == 2 && dim0 == 0 && dim1 == 1) {
 
@@ -326,7 +324,7 @@ TensorPtr Tensor::transpose(int dim0, int dim1) const {
 
         for (int64_t i = 0; i < rows; ++i) {
             for (int64_t j = 0; j < cols; ++j) {
-                dst_data[j * rows + i] = src_data[i * cols + j];
+                copy_element(j * rows + i, i * cols + j);
             }
         }
     } else {
@@ -350,7 +348,7 @@ TensorPtr Tensor::transpose(int dim0, int dim1) const {
                 stride *= new_shape[d];
             }
 
-            dst_data[dst_linear_idx] = src_data[linear_idx];
+            copy_element(dst_linear_idx, linear_idx);
         }
     }
 
@@ -415,11 +413,12 @@ TensorPtr Tensor::slice(int dim, int64_t start, int64_t end, int64_t step) const
     start = std::max(int64_t(0), std::min(start, dim_size));
     end = std::max(int64_t(0), std::min(end, dim_size));
     
-    if (step != 1) {
-        throw TensorError("slice with step != 1 not implemented");
+    if (step <= 0) {
+        throw TensorError("slice step must be positive");
     }
     
-    int64_t slice_len = end - start;
+    int64_t span = end - start;
+    int64_t slice_len = (span + step - 1) / step;
     if (slice_len <= 0) {
         throw TensorError("slice length must be positive");
     }
@@ -431,9 +430,9 @@ TensorPtr Tensor::slice(int dim, int64_t start, int64_t end, int64_t step) const
     // Create result tensor
     auto result = std::make_shared<Tensor>(new_shape, dtype_, device_);
     
-    // Copy data (simplified: contiguous slices only)
-    const float* src_data = data<float>();
-    float* dst_data = result->data<float>();
+    const auto element_size = dtype_size(dtype_);
+    const auto* src_data = static_cast<const uint8_t*>(data_ptr());
+    auto* dst_data = static_cast<uint8_t*>(result->data_ptr());
     
     // Compute strides
     std::vector<int64_t> strides(ndim());
@@ -447,14 +446,18 @@ TensorPtr Tensor::slice(int dim, int64_t start, int64_t end, int64_t step) const
     std::function<void(int, int64_t)> copy_slice;
     copy_slice = [&](int d, int64_t src_offset) {
         if (d == ndim()) {
-            dst_data[dst_idx++] = src_data[src_offset];
+            std::memcpy(dst_data + dst_idx * static_cast<int64_t>(element_size),
+                        src_data + src_offset * static_cast<int64_t>(element_size),
+                        element_size);
+            ++dst_idx;
             return;
         }
         
         int64_t dim_start = (d == dim) ? start : 0;
         int64_t dim_end = (d == dim) ? end : shape_[d];
+        int64_t dim_step = (d == dim) ? step : 1;
         
-        for (int64_t i = dim_start; i < dim_end; ++i) {
+        for (int64_t i = dim_start; i < dim_end; i += dim_step) {
             copy_slice(d + 1, src_offset + i * strides[d]);
         }
     };
@@ -465,10 +468,10 @@ TensorPtr Tensor::slice(int dim, int64_t start, int64_t end, int64_t step) const
         result->set_requires_grad(true);
         auto input_ptr = shared_from_this_or_clone();
         #ifdef USE_NEW_AUTOGRAD_ENGINE
-        auto backward_fn = std::make_shared<SliceBackward>(input_ptr, dim, start, slice_len);
+        auto backward_fn = std::make_shared<SliceBackward>(input_ptr, dim, start, slice_len, step);
         autograd::Engine::instance().register_node(result, {input_ptr}, backward_fn);
         #else
-        result->set_grad_fn([input_ptr, dim, start, slice_len](const TensorPtr& grad_output) -> std::vector<TensorPtr> {
+        result->set_grad_fn([input_ptr, dim, start, slice_len, step](const TensorPtr& grad_output) -> std::vector<TensorPtr> {
             auto grad_input = zeros(input_ptr->shape(), input_ptr->dtype(), input_ptr->device());
             const float* grad_out = grad_output->data<float>();
             float* grad_in = grad_input->data<float>();
@@ -495,9 +498,10 @@ TensorPtr Tensor::slice(int dim, int64_t start, int64_t end, int64_t step) const
                 int64_t steps = (d == dim) ? slice_len : input_shape[d];
                 int64_t in_start = (d == dim) ? start : 0;
                 for (int64_t i = 0; i < steps; ++i) {
+                    int64_t in_index = (d == dim) ? (in_start + i * step) : (in_start + i);
                     scatter(d + 1,
                             out_offset + i * out_strides[d],
-                            in_offset + (in_start + i) * in_strides[d]);
+                            in_offset + in_index * in_strides[d]);
                 }
             };
             scatter(0, 0, 0);
@@ -656,7 +660,7 @@ TensorPtr zeros(const std::vector<int64_t>& shape, DType dtype, Device device) {
     auto tensor = std::make_shared<Tensor>(shape, dtype, device);
 
     // 🔧 FIX: 确保所有类型都清零
-    if (dtype == kFloat32 || dtype == kFloat16) {
+    if (dtype == kFloat32 || dtype == kFloat16 || dtype == kBFloat16) {
         std::memset(tensor->data_ptr(), 0, tensor->numel() * dtype_size(dtype));
     } else if (dtype == kInt32) {
         std::memset(tensor->data_ptr(), 0, tensor->numel() * sizeof(int32_t));
@@ -675,6 +679,12 @@ TensorPtr ones(const std::vector<int64_t>& shape, DType dtype, Device device) {
     if (dtype == kFloat32) {
         float* data = tensor->data<float>();
         std::fill_n(data, tensor->numel(), 1.0f);
+    } else if (dtype == kFloat16) {
+        uint16_t* data = tensor->data<uint16_t>();
+        std::fill_n(data, tensor->numel(), float32_to_fp16_bits(1.0f));
+    } else if (dtype == kBFloat16) {
+        uint16_t* data = tensor->data<uint16_t>();
+        std::fill_n(data, tensor->numel(), float32_to_bf16_bits(1.0f));
     } else if (dtype == kInt32) {
         int32_t* data = tensor->data<int32_t>();
         std::fill_n(data, tensor->numel(), 1);
@@ -747,6 +757,12 @@ TensorPtr full(const std::vector<int64_t>& shape, float value, DType dtype, Devi
     if (dtype == kFloat32) {
         float* data = tensor->data<float>();
         std::fill_n(data, tensor->numel(), value);
+    } else if (dtype == kFloat16) {
+        uint16_t* data = tensor->data<uint16_t>();
+        std::fill_n(data, tensor->numel(), float32_to_fp16_bits(value));
+    } else if (dtype == kBFloat16) {
+        uint16_t* data = tensor->data<uint16_t>();
+        std::fill_n(data, tensor->numel(), float32_to_bf16_bits(value));
     }
 
     return tensor;
@@ -761,7 +777,19 @@ TensorPtr from_blob(void* data, const std::vector<int64_t>& shape, DType dtype, 
 
 TensorPtr tensor(const std::vector<float>& data, DType dtype, Device device) {
     std::vector<int64_t> shape = {static_cast<int64_t>(data.size())};
-    return std::make_shared<Tensor>(shape, data.data(), dtype, device);
+    auto t = std::make_shared<Tensor>(shape, dtype, device);
+    if (dtype == kFloat32) {
+        std::memcpy(t->data_ptr(), data.data(), data.size() * sizeof(float));
+    } else if (dtype == kFloat16) {
+        uint16_t* dst = t->data<uint16_t>();
+        for (size_t i = 0; i < data.size(); ++i) dst[i] = float32_to_fp16_bits(data[i]);
+    } else if (dtype == kBFloat16) {
+        uint16_t* dst = t->data<uint16_t>();
+        for (size_t i = 0; i < data.size(); ++i) dst[i] = float32_to_bf16_bits(data[i]);
+    } else {
+        throw TensorError("tensor(vector<float>): unsupported dtype " + DTypeUtils::to_string(dtype));
+    }
+    return t;
 }
 
 TensorPtr tensor(std::initializer_list<float> data, DType dtype, Device device) {

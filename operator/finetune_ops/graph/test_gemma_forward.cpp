@@ -79,8 +79,8 @@ int main(int argc, char** argv) {
     auto cfg = GemmaTextConfig::from_pretrained(model_dir);
     GemmaModel model(cfg);
 
-    SafeTensorsReader reader(model_dir + "/model.safetensors");
-    reader.parse_header();
+    SafeTensorsModelReader reader(model_dir);
+    reader.parse_headers();
     auto mapping = GemmaKeyMapper::generate_gemma_mapping(cfg.num_hidden_layers);
     SafeTensorsLoadOptions opts;
     opts.verbose = false;

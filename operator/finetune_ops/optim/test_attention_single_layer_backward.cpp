@@ -22,7 +22,7 @@ static float rel_diff(const TensorPtr& a, const TensorPtr& b) {
 }
 
 // Minimal RMSNorm forward (y = x_hat * (1 + w))
-static TensorPtr rms_norm_manual(const TensorPtr& x, const TensorPtr& w, float eps) {
+[[maybe_unused]] static TensorPtr rms_norm_manual(const TensorPtr& x, const TensorPtr& w, float eps) {
     const auto& s = x->shape(); // [B,H,S,D] or [B,S,D]
     auto y = zeros(s, x->dtype(), x->device());
     const float* xd = x->data<float>();
@@ -314,5 +314,4 @@ int main() {
     std::cout << (ok ? "[PASS]" : "[FAIL]") << std::endl;
     return ok ? 0 : 1;
 }
-
 

@@ -37,6 +37,10 @@ struct SafeTensorsLoadOptions {
     bool auto_promote_fp16 = true;  // auto-promote FP16 to FP32
     bool verbose = true;            // print load logs
     bool strict_shape_check = true; // strict shape validation
+    // Preserve original F16/BF16 storage for matching internal or HF keys even
+    // when auto_promote_fp16 is true. Used for frozen base weights where
+    // trainable grads and optimizer state remain FP32.
+    std::vector<std::string> preserve_low_precision_key_substrings;
 };
 
 /**
@@ -88,7 +92,34 @@ private:
     std::unordered_map<std::string, SafeTensorInfo> tensor_map_;
     
     void parse_tensor_metadata(const std::string& json_str);
-    TensorPtr read_tensor_data(const SafeTensorInfo& info, bool transpose);
+    TensorPtr read_tensor_data(const SafeTensorInfo& info, bool transpose, bool preserve_low_precision);
+};
+
+/**
+ * @brief SafeTensors model reader for either a single model.safetensors file or
+ * a HuggingFace sharded snapshot with model.safetensors.index.json.
+ */
+class SafeTensorsModelReader {
+public:
+    explicit SafeTensorsModelReader(const std::string& model_dir_or_file);
+
+    void parse_headers();
+
+    std::vector<std::string> get_tensor_names() const;
+
+    std::unordered_map<std::string, TensorPtr>
+    load_tensors_mapped(const std::unordered_map<std::string, std::string>& key_mapping,
+                        const SafeTensorsLoadOptions& options = SafeTensorsLoadOptions());
+
+    const std::vector<std::string>& files() const { return files_; }
+
+    static std::vector<std::string> resolve_weight_files(const std::string& model_dir_or_file);
+
+private:
+    std::string model_dir_or_file_;
+    std::vector<std::string> files_;
+    std::vector<std::unique_ptr<SafeTensorsReader>> readers_;
+    std::unordered_map<std::string, size_t> tensor_to_reader_;
 };
 
 /**

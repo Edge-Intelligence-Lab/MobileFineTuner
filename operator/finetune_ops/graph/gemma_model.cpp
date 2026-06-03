@@ -708,6 +708,30 @@ const GemmaBlockWeights& GemmaModel::get_block(int i) const {
     return blocks_[i];
 }
 
+std::vector<TensorPtr> GemmaModel::parameters() const {
+    std::vector<TensorPtr> params;
+    params.reserve(3 + static_cast<size_t>(config_.num_hidden_layers) * 13);
+    params.push_back(embed_weight_);
+    params.push_back(norm_weight_);
+    params.push_back(lm_head_weight_);
+    for (const auto& block : blocks_) {
+        params.push_back(block.input_layernorm_weight);
+        params.push_back(block.post_attention_layernorm_weight);
+        params.push_back(block.pre_feedforward_layernorm_weight);
+        params.push_back(block.post_feedforward_layernorm_weight);
+        params.push_back(block.q_proj_weight);
+        params.push_back(block.k_proj_weight);
+        params.push_back(block.v_proj_weight);
+        params.push_back(block.o_proj_weight);
+        params.push_back(block.q_norm_weight);
+        params.push_back(block.k_norm_weight);
+        params.push_back(block.gate_proj_weight);
+        params.push_back(block.up_proj_weight);
+        params.push_back(block.down_proj_weight);
+    }
+    return params;
+}
+
 void GemmaModel::enable_debug_dump(const std::string& dir, const std::vector<int>& layers) {
     debug_.enabled = true;
     debug_.dir = dir;

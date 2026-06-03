@@ -5,9 +5,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Build operators as a subdir to get liboperators.a
-add_subdirectory(../operators ${CMAKE_BINARY_DIR}/operators)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../operators)
+# Build operator library from the in-repo source tree
+set(BUILD_TESTS OFF CACHE BOOL "Disable operator tests in app builds" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "Disable operator examples in app builds" FORCE)
+add_subdirectory(../operator ${CMAKE_BINARY_DIR}/operator)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../operator)
 
 add_executable(train
     src/main.cpp
@@ -32,5 +34,3 @@ add_executable(train_full
     src/main_full.cpp
 )
 target_link_libraries(train_full PRIVATE operators)
-
-

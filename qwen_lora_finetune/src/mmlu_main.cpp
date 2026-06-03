@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <fstream>
 #include <sstream>
+#include <filesystem>
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -58,10 +59,12 @@ struct Args {
     float lora_alpha = 16.0f;
     float lora_dropout = 0.0f;  // MMLU finetune typically keeps dropout off
     bool qv_only = true;        // attach LoRA on q and v only
+    uint64_t seed = 42;
     int log_interval = 10;
     std::string output_dir = "outputs";
     std::string log_file = "";  // optional log file path
     bool save_weights = true;   // whether to save weights
+    std::string base_weight_storage = "auto";
 };
 
 // Simple logger that mirrors stdout to file when enabled
@@ -123,11 +126,33 @@ static void parse_args(int argc, char** argv, Args& args) {
         else if (k == "--lora_dropout") args.lora_dropout = get_float();
         else if (k == "--qv_only") args.qv_only = true;
         else if (k == "--qkvo") args.qv_only = false;
+        else if (k == "--seed") args.seed = static_cast<uint64_t>(std::stoull(get_str()));
         else if (k == "--log_interval") args.log_interval = get_int();
         else if (k == "--output_dir") args.output_dir = get_str();
         else if (k == "--log_file") args.log_file = get_str();
         else if (k == "--no_save") args.save_weights = false;
+        else if (k == "--base_weight_storage") args.base_weight_storage = get_str();
     }
+}
+
+static void configure_qwen_base_weight_storage(SafeTensorsLoadOptions& opts,
+                                               const std::string& policy) {
+    if (policy == "fp32") {
+        return;
+    }
+    if (policy != "auto" && policy != "native") {
+        throw std::runtime_error("--base_weight_storage must be one of: auto, native, fp32");
+    }
+    opts.preserve_low_precision_key_substrings = {
+        "embed_tokens.weight",
+        "self_attn.q_proj.weight",
+        "self_attn.k_proj.weight",
+        "self_attn.v_proj.weight",
+        "self_attn.o_proj.weight",
+        "mlp.gate_proj.weight",
+        "mlp.up_proj.weight",
+        "mlp.down_proj.weight"
+    };
 }
 
 void print_config(const Args& args) {
@@ -143,6 +168,8 @@ void print_config(const Args& args) {
     std::cout << "LoRA rank: " << args.lora_r << "\n";
     std::cout << "LoRA alpha: " << args.lora_alpha << "\n";
     std::cout << "LoRA targets: " << (args.qv_only ? "q, v only" : "q, k, v, o") << "\n";
+    std::cout << "Seed: " << args.seed << "\n";
+    std::cout << "Base weight storage: " << args.base_weight_storage << "\n";
     std::cout << "================================================\n\n";
 }
 
@@ -160,8 +187,8 @@ int main(int argc, char** argv) {
     }
     
     // 创建输出目录
-    system(("mkdir -p " + args.output_dir).c_str());
-    system("mkdir -p logs");
+    std::filesystem::create_directories(args.output_dir);
+    std::filesystem::create_directories("logs");
     
     Logger log(args.log_file);
     
@@ -198,23 +225,27 @@ int main(int argc, char** argv) {
         
         // 3) Load weights
         log << "[3/6] Loading model weights...\n";
-        SafeTensorsReader reader(args.model_dir + "/model.safetensors");
-        reader.parse_header();
+        SafeTensorsModelReader reader(args.model_dir);
+        reader.parse_headers();
         auto mapping = QwenKeyMapper::generate_qwen_mapping(qcfg.num_hidden_layers);
         SafeTensorsLoadOptions load_opts;
         load_opts.verbose = false;
         load_opts.transpose_linear = true;
+        configure_qwen_base_weight_storage(load_opts, args.base_weight_storage);
         auto tensors = reader.load_tensors_mapped(mapping, load_opts);
         for (auto& kv : tensors) {
             model.assign_weight(kv.first, kv.second);
         }
+        // Release constructor placeholder tensors that were replaced by real
+        // safetensors before any training allocations begin.
+        MemoryManager::instance().clear_unused_memory();
         
         double after_load_rss = get_rss_mb();
         log << "[After model load] RSS: " << std::fixed << std::setprecision(1) << after_load_rss << " MB\n";
         
         // 4) LoRA init (qv_only=true)
         log << "[4/6] Initializing LoRA (q/v only)...\n";
-        model.init_lora(args.lora_r, args.lora_alpha, args.lora_dropout, args.qv_only);
+        model.init_lora(args.lora_r, args.lora_alpha, args.lora_dropout, args.qv_only, args.seed);
         model.freeze_base();
         auto lora_params = model.get_lora_parameters();
         log << "  Total LoRA parameters: " << lora_params.size() << "\n";
@@ -411,5 +442,3 @@ int main(int argc, char** argv) {
     
     return 0;
 }
-
-

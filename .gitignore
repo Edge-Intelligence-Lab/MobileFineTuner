@@ -1,8 +1,14 @@
 # Build directories
 build/
 build_*/
+build-*/
+operator/build*/
+operator/install/
 operators/build/
 operators/build_*/
+*/build/
+*/build-android/
+*/cmake-build-*/
 *.cmake
 CMakeCache.txt
 CMakeFiles/
@@ -20,11 +26,12 @@ cmake_install.cmake
 # Model weights and data (too large for GitHub)
 gemma-3-270m/
 gemma-3-1b/
-gpt2_lora_finetune/pretrained/
+**/pretrained/
 data/wikitext2/
 data/pretokenized/
 data/mmlu/data.tar
 data/mmlu/data/
+data/qnli/
 *.safetensors
 *.bin
 *.pt
@@ -34,6 +41,12 @@ data/mmlu/data/
 # Training outputs
 runs/
 pytorch_runs/
+**/outputs/
+**/logs/
+review-stage/
+review-stage/phone_artifacts/
+*.csv
+*.xlsx
 *.log
 *.jsonl
 
@@ -46,6 +59,7 @@ __pycache__/
 env/
 venv/
 .venv/
+.venv*/
 pt_env/
 ENV/
 *.egg-info/
@@ -60,6 +74,7 @@ ENV/
 *.swo
 *~
 .DS_Store
+**/.DS_Store
 
 # Temporary files
 tmp/
@@ -71,3 +86,17 @@ temp/
 # Large test files
 *.npy
 
+# Android / Gradle
+.gradle/
+android-visualizer/.gradle/
+android-visualizer/build/
+android-visualizer/app/build/
+local.properties
+
+# Local Codex/ARIS installation state
+.agents/
+.aris/
+AGENTS.md
+
+# Archived historical experiments excluded from MF product release
+Rubbish/

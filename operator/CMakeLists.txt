@@ -1,19 +1,16 @@
 cmake_minimum_required(VERSION 3.10)
 project(Operators VERSION 2.0.0 LANGUAGES CXX)
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 # ============================================================================
 # Industrial-grade configuration options
 # ============================================================================
 option(USE_NEW_AUTOGRAD_ENGINE "Enable topological autograd engine" ON)
 option(AUTOGRAD_DEBUG "Enable autograd debug logging" OFF)
-option(USE_MOBILE_OPTIMIZER "Enable mobile optimizer extensions" ON)
-option(ENABLE_MEMORY_MODULE "Enable Memory module (param mgmt / Zero)" ON)
-option(ENABLE_ACTIVATIONS_MODULE "Enable Activations module (ckpt/activation mgmt)" ON)
 option(USE_ARENA_ALLOCATOR "Use arena allocator (control RSS growth)" OFF)
 option(USE_BLAS "Enable BLAS acceleration (ON=Accelerate/OpenBLAS, OFF=pure C++)" OFF)
 option(DISABLE_MEMORY_POOL "Disable custom memory pool; tensors use system malloc/free" OFF)
-option(ENABLE_SHARDING_MODULE "Enable parameter sharding module" OFF)
-option(ENABLE_ENERGY_MONITOR "Enable power/energy monitor" OFF)
 # Allow override via env (e.g., OPS_USE_BLAS=ON/OFF)
 if(DEFINED ENV{OPS_USE_BLAS})
     string(TOUPPER "$ENV{OPS_USE_BLAS}" _OPS_USE_BLAS)
@@ -28,6 +25,7 @@ option(BUILD_EXAMPLES "Build example targets" OFF)
 option(ENABLE_PROFILING "Enable profiling" OFF)
 option(ENABLE_GPT2_DEBUG_PRINT "Enable GPT-2 forward debug print" OFF)
 option(BUILD_LEGACY_CLI "Build legacy top-level CLIs (eval_mmlu/eval_ppl)" OFF)
+option(OPERATORS_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 # ============================================================================
 # C++ standard
@@ -39,7 +37,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # ============================================================================
 # Compiler options
 # ============================================================================
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O2")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
+if(OPERATORS_WARNINGS_AS_ERRORS)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
+endif()
 
 if(AUTOGRAD_DEBUG)
     add_definitions(-DAUTOGRAD_DEBUG)
@@ -83,14 +84,11 @@ if(ENABLE_PROFILING)
 endif()
 
 # ============================================================================
-# Include directories (finetune_ops / opt_ops roots)
+# Include directories used while building this target
 # ============================================================================
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops
-    ${CMAKE_CURRENT_SOURCE_DIR}/opt_ops
-    ${CMAKE_CURRENT_SOURCE_DIR}/opt_ops/core_ext
-    ${CMAKE_CURRENT_SOURCE_DIR}/opt_ops/parameter
 )
 
 # =========================================================================
@@ -135,42 +133,25 @@ set(FINETUNE_SOURCES
     finetune_ops/optim/gemma_trainer.cpp
 )
 
-# OPT_SOURCES disabled for now (A/B stage does not need them; avoid deps)
-set(OPT_SOURCES)
-
-# Optional: parameter sharding module
-if(ENABLE_SHARDING_MODULE)
-    list(APPEND OPT_SOURCES
-        opt_ops/sharding/parameter_sharder.cpp
-    )
-endif()
-
-# Optional: power/energy monitor module
-if(ENABLE_ENERGY_MONITOR)
-    list(APPEND OPT_SOURCES
-        opt_ops/energy/power_monitor.cpp
-    )
-endif()
-
 # =========================================================================
 # Create static library
 # =========================================================================
 add_library(operators STATIC
     ${FINETUNE_SOURCES}
-    ${OPT_SOURCES}
 )
+add_library(MobileFineTuner::operators ALIAS operators)
 
-# Propagate include dirs to dependents
-target_include_directories(operators PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops
-    ${CMAKE_CURRENT_SOURCE_DIR}/opt_ops
-    ${CMAKE_CURRENT_SOURCE_DIR}/opt_ops/core_ext
-    ${CMAKE_CURRENT_SOURCE_DIR}/opt_ops/parameter
+# Propagate only the stable finetune surface to dependents.
+target_include_directories(operators
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 # =============================================================================
-# Modular targets (finetune_ops / opt_ops)
+# Modular targets
 # =============================================================================
 # Using new directory layout (no modules/ references)
 
@@ -223,17 +204,89 @@ set_target_properties(operators PROPERTIES
 # Install rules
 # ============================================================================
 install(TARGETS operators
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
+    EXPORT OperatorsTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
-    DESTINATION include/operators
-    FILES_MATCHING PATTERN "*.h"
+install(DIRECTORY
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/mobile_finetuner
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING
+        PATTERN "*.h"
+        PATTERN "*.hpp"
+)
+
+install(DIRECTORY
+    ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/data
+    ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/graph
+    ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/nn
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/finetune_ops
+    FILES_MATCHING
+        PATTERN "*.h"
+        PATTERN "*.hpp"
+)
+
+install(FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/adam.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/gemma_trainer.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/optimizer.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/trainer.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/finetune_ops/optim
+)
+
+install(EXPORT OperatorsTargets
+    FILE OperatorsTargets.cmake
+    NAMESPACE Operators::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Operators
+)
+
+install(EXPORT OperatorsTargets
+    FILE MobileFineTunerTargets.cmake
+    NAMESPACE MobileFineTuner::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/MobileFineTuner
+)
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/OperatorsConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/OperatorsConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/OperatorsConfig.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Operators
+)
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/MobileFineTunerConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MobileFineTunerConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/MobileFineTunerConfig.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/MobileFineTuner
+)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/OperatorsConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/OperatorsConfigVersion.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Operators
+)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/MobileFineTunerConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/MobileFineTunerConfigVersion.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/MobileFineTuner
 )
 
 # =============================================================================
-# Modular targets (finetune_ops / opt_ops)
+# Modular targets
 # =============================================================================
 # Using new directory layout (no modules/ references)
 
@@ -254,48 +307,7 @@ if(BUILD_TESTS)
         endif()
     endif()
     
-    # Optimizer tests
-    if(USE_MOBILE_OPTIMIZER)
-        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/optim/comprehensive_optimizer_test.cpp)
-            add_executable(test_optimizer
-                optim/comprehensive_optimizer_test.cpp
-            )
-            target_link_libraries(test_optimizer operators)
-            add_test(NAME Optimizer COMMAND test_optimizer)
-        endif()
-    endif()
-    
-    # Memory module tests
-    if(ENABLE_MEMORY_MODULE)
-        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_memory_module.cpp)
-            add_executable(test_memory_module
-                tests/test_memory_module.cpp
-            )
-            target_link_libraries(test_memory_module operators)
-            add_test(NAME MemoryModule COMMAND test_memory_module)
-        endif()
-    endif()
-    
-    # Activations module tests
-    if(ENABLE_ACTIVATIONS_MODULE)
-        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_activations_module.cpp)
-            add_executable(test_activations_module
-                tests/test_activations_module.cpp
-            )
-            target_link_libraries(test_activations_module operators)
-            add_test(NAME ActivationsModule COMMAND test_activations_module)
-        endif()
-    endif()
-    
     # === Stage B test programs ===
-    
-    # Minimal training loop
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/test_train_minimal.cpp)
-        add_executable(test_train_minimal
-            finetune_ops/optim/test_train_minimal.cpp
-        )
-        target_link_libraries(test_train_minimal operators)
-    endif()
     
     # Backward gradient test
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/test_backward_sanity.cpp)
@@ -319,6 +331,7 @@ if(BUILD_TESTS)
             finetune_ops/optim/test_qkt_softmax_grad.cpp
         )
         target_link_libraries(test_qkt_softmax_grad operators)
+        add_test(NAME QKTSoftmaxGrad COMMAND test_qkt_softmax_grad)
     endif()
     
     # RMSNorm forward/backward small-dim unit test (T4)
@@ -336,6 +349,7 @@ if(BUILD_TESTS)
             finetune_ops/optim/test_repeat_kv_softmax_grad.cpp
         )
         target_link_libraries(test_repeat_kv_softmax_grad operators)
+        add_test(NAME RepeatKVSoftmaxGrad COMMAND test_repeat_kv_softmax_grad)
     endif()
     
     # T3: single-layer attention-only backward microtest
@@ -344,6 +358,7 @@ if(BUILD_TESTS)
             finetune_ops/optim/test_attention_single_layer_backward.cpp
         )
         target_link_libraries(test_attention_single_layer_backward operators)
+        add_test(NAME AttentionSingleLayerBackward COMMAND test_attention_single_layer_backward)
     endif()
     
     # LoRALinear gradient test
@@ -385,6 +400,79 @@ if(BUILD_TESTS)
             finetune_ops/graph/test_lora_roundtrip.cpp
         )
         target_link_libraries(test_lora_roundtrip operators)
+        add_test(NAME LoRARoundTrip COMMAND test_lora_roundtrip)
+    endif()
+
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/test_gpt2_lora_two_step_smoke.cpp)
+        add_executable(test_gpt2_lora_two_step_smoke
+            finetune_ops/optim/test_gpt2_lora_two_step_smoke.cpp
+        )
+        target_link_libraries(test_gpt2_lora_two_step_smoke operators)
+        add_test(NAME GPT2LoRATwoStepSmoke COMMAND test_gpt2_lora_two_step_smoke)
+    endif()
+
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/graph/test_gemma_lora_roundtrip.cpp)
+        add_executable(test_gemma_lora_roundtrip
+            finetune_ops/graph/test_gemma_lora_roundtrip.cpp
+        )
+        target_link_libraries(test_gemma_lora_roundtrip operators)
+        add_test(NAME GemmaLoRARoundTrip COMMAND test_gemma_lora_roundtrip)
+    endif()
+
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/core/test_memory_efficient_attention_grad.cpp)
+        add_executable(test_memory_efficient_attention_grad
+            finetune_ops/core/test_memory_efficient_attention_grad.cpp
+        )
+        target_link_libraries(test_memory_efficient_attention_grad operators)
+        add_test(NAME MemoryEfficientAttentionGrad COMMAND test_memory_efficient_attention_grad)
+    endif()
+
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/core/test_apply_rope_layout.cpp)
+        add_executable(test_apply_rope_layout
+            finetune_ops/core/test_apply_rope_layout.cpp
+        )
+        target_link_libraries(test_apply_rope_layout operators)
+        add_test(NAME ApplyRoPELayout COMMAND test_apply_rope_layout)
+    endif()
+
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/core/test_autograd_leaf_accum.cpp)
+        add_executable(test_autograd_leaf_accum
+            finetune_ops/core/test_autograd_leaf_accum.cpp
+        )
+        target_link_libraries(test_autograd_leaf_accum operators)
+        add_test(NAME AutogradLeafAccum COMMAND test_autograd_leaf_accum)
+    endif()
+
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/core/test_dtype_mixed_precision.cpp)
+        add_executable(test_dtype_mixed_precision
+            finetune_ops/core/test_dtype_mixed_precision.cpp
+        )
+        target_link_libraries(test_dtype_mixed_precision operators)
+        add_test(NAME DTypeMixedPrecision COMMAND test_dtype_mixed_precision)
+    endif()
+
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/core/test_tensor_slice.cpp)
+        add_executable(test_tensor_slice
+            finetune_ops/core/test_tensor_slice.cpp
+        )
+        target_link_libraries(test_tensor_slice operators)
+        add_test(NAME TensorSlice COMMAND test_tensor_slice)
+    endif()
+
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/core/test_selected_token_lm_loss.cpp)
+        add_executable(test_selected_token_lm_loss
+            finetune_ops/core/test_selected_token_lm_loss.cpp
+        )
+        target_link_libraries(test_selected_token_lm_loss operators)
+        add_test(NAME SelectedTokenLMLoss COMMAND test_selected_token_lm_loss)
+    endif()
+
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/data/test_jsonl_mask_alignment.cpp)
+        add_executable(test_jsonl_mask_alignment
+            finetune_ops/data/test_jsonl_mask_alignment.cpp
+        )
+        target_link_libraries(test_jsonl_mask_alignment operators)
+        add_test(NAME JsonlMaskAlignment COMMAND test_jsonl_mask_alignment)
     endif()
 
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/graph/test_gemma_config.cpp)
@@ -484,12 +572,10 @@ message(STATUS "============================================")
 message(STATUS "Operators configuration summary v${PROJECT_VERSION}")
 message(STATUS "============================================")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")
-message(STATUS "Core modules:")
+message(STATUS "Stable core:")
 message(STATUS "  - Autograd engine: ${USE_NEW_AUTOGRAD_ENGINE}")
-message(STATUS "  - Mobile optimizer: ${USE_MOBILE_OPTIMIZER}")
-message(STATUS "Advanced modules:")
-message(STATUS "  - Memory module: ${ENABLE_MEMORY_MODULE}")
-message(STATUS "  - Activations module: ${ENABLE_ACTIVATIONS_MODULE}")
+message(STATUS "  - BLAS acceleration: ${USE_BLAS}")
+message(STATUS "  - Arena allocator: ${USE_ARENA_ALLOCATOR}")
 message(STATUS "Developer tools:")
 message(STATUS "  - Build tests: ${BUILD_TESTS}")
 message(STATUS "  - Profiling: ${ENABLE_PROFILING}")

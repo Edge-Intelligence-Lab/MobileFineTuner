@@ -1,11 +1,13 @@
 #include "gemma_lora_injector.h"
+#include "lora_saver.h"
 
+#include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <random>
 #include <unordered_map>
-#include <fstream>
-#include <sstream>
 
 namespace ops {
 
@@ -25,6 +27,54 @@ LinearRef resolve_linear(GemmaBlockWeights& block, const std::string& name) {
     if (name == "up_proj") return {block.up_proj_lora.get(), block.up_proj_weight};
     if (name == "down_proj") return {block.down_proj_lora.get(), block.down_proj_weight};
     return {nullptr, nullptr};
+}
+
+std::string save_target_to_module_name(const std::string& save_target) {
+    if (save_target == "attn.q") return "q_proj";
+    if (save_target == "attn.k") return "k_proj";
+    if (save_target == "attn.v") return "v_proj";
+    if (save_target == "attn.proj") return "o_proj";
+    if (save_target == "mlp.gate") return "gate_proj";
+    if (save_target == "mlp.up") return "up_proj";
+    if (save_target == "mlp.down") return "down_proj";
+    return "";
+}
+
+std::string canonicalize_save_target(std::string target) {
+    size_t tail_dot = target.rfind('.');
+    if (tail_dot == std::string::npos || tail_dot + 1 >= target.size()) {
+        return target;
+    }
+    bool numeric_suffix = true;
+    for (size_t i = tail_dot + 1; i < target.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(target[i]))) {
+            numeric_suffix = false;
+            break;
+        }
+    }
+    if (numeric_suffix) {
+        target.erase(tail_dot);
+    }
+    return target;
+}
+
+void clear_lora_modules(GemmaBlockWeights& block) {
+    if (block.q_proj_lora) block.q_proj_lora->clear_lora();
+    if (block.k_proj_lora) block.k_proj_lora->clear_lora();
+    if (block.v_proj_lora) block.v_proj_lora->clear_lora();
+    if (block.o_proj_lora) block.o_proj_lora->clear_lora();
+    if (block.gate_proj_lora) block.gate_proj_lora->clear_lora();
+    if (block.up_proj_lora) block.up_proj_lora->clear_lora();
+    if (block.down_proj_lora) block.down_proj_lora->clear_lora();
+}
+
+std::string join_csv(const std::vector<std::string>& items) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (i > 0) oss << ",";
+        oss << items[i];
+    }
+    return oss.str();
 }
 
 std::pair<TensorPtr, TensorPtr> create_lora_params(int64_t in_dim, int64_t out_dim, int rank) {
@@ -131,20 +181,22 @@ void GemmaLoraInjector::save_lora_safetensors(const std::string& path) const {
         std::cerr << "[GemmaLoraInjector] save_lora_safetensors: model not set" << std::endl;
         return;
     }
-    // Collect LoRA A/B (keys follow PEFT style: layer.{i}.attn.{q|k|v|proj}.lora_{A|B})
     std::unordered_map<std::string, TensorPtr> state;
+    std::vector<std::string> exported_targets;
     auto add_slice = [&](int layer, const std::string& target, const LoRALinear* lin) {
         if (!lin) return;
         const auto& slices = lin->slices();
         if (slices.empty()) return;
-        // This implementation expects one slice per module; if multiple slices exist, write them with incremental suffixes
+        if (std::find(exported_targets.begin(), exported_targets.end(), target) == exported_targets.end()) {
+            exported_targets.push_back(target);
+        }
         for (size_t si = 0; si < slices.size(); ++si) {
             const auto& sl = slices[si];
             if (!sl.A || !sl.B) continue;
             std::string base = "layer." + std::to_string(layer) + "." + target;
             if (slices.size() > 1) base += ("." + std::to_string(si));
-            state[base + ".lora_A"] = sl.A;  // A: [r, in] or [in, r] handled by LoRALinear; kept as-is (PEFT uses [r,in])
-            state[base + ".lora_B"] = sl.B;  // B: [out, r] or [r, out] likewise
+            state[base + ".lora_A"] = sl.A;
+            state[base + ".lora_B"] = sl.B;
         }
     };
     const auto& cfg = model_->config();
@@ -154,23 +206,20 @@ void GemmaLoraInjector::save_lora_safetensors(const std::string& path) const {
         add_slice(i, "attn.k", blk.k_proj_lora.get());
         add_slice(i, "attn.v", blk.v_proj_lora.get());
         add_slice(i, "attn.proj", blk.o_proj_lora.get());
-        // If MLP LoRA is enabled later, add mappings below (not exported now to avoid clashes with other implementations):
-        // add_slice(i, "mlp.gate", blk.gate_proj_lora.get());
-        // add_slice(i, "mlp.up",   blk.up_proj_lora.get());
-        // add_slice(i, "mlp.down", blk.down_proj_lora.get());
+        add_slice(i, "mlp.gate", blk.gate_proj_lora.get());
+        add_slice(i, "mlp.up", blk.up_proj_lora.get());
+        add_slice(i, "mlp.down", blk.down_proj_lora.get());
     }
-    // Write safetensors
     std::ofstream out(path, std::ios::binary);
     if (!out) {
         std::cerr << "[GemmaLoraInjector] Cannot open " << path << " for writing" << std::endl;
         return;
     }
-    // Sort keys for deterministic ordering
+    std::sort(exported_targets.begin(), exported_targets.end());
     std::vector<std::string> keys;
     keys.reserve(state.size());
     for (const auto& kv : state) keys.push_back(kv.first);
     std::sort(keys.begin(), keys.end());
-    // Build header JSON
     size_t offset = 0;
     std::ostringstream header;
     header << "{";
@@ -197,13 +246,12 @@ void GemmaLoraInjector::save_lora_safetensors(const std::string& path) const {
     header << "\"rank\":\"" << spec_.rank << "\",";
     header << "\"alpha\":\"" << spec_.alpha << "\",";
     header << "\"dropout\":\"" << spec_.dropout << "\",";
-    header << "\"targets\":\"attn.q,attn.k,attn.v,attn.proj\"";
+    header << "\"targets\":\"" << join_csv(exported_targets) << "\"";
     header << "}}";
     std::string header_str = header.str();
     uint64_t header_len = static_cast<uint64_t>(header_str.size());
     out.write(reinterpret_cast<const char*>(&header_len), 8);
     out.write(header_str.c_str(), static_cast<std::streamsize>(header_str.size()));
-    // Write tensor data sequentially (F32)
     for (const auto& name : keys) {
         const auto& t = state.at(name);
         const float* data = t->data<float>();
@@ -216,7 +264,116 @@ void GemmaLoraInjector::save_lora_safetensors(const std::string& path) const {
 }
 
 void GemmaLoraInjector::load_lora_safetensors(const std::string& path) {
-    std::cout << "[GemmaLoraInjector] load_lora_safetensors not implemented yet (" << path << ")" << std::endl;
+    if (!model_) {
+        throw std::logic_error("GemmaLoraInjector::load_lora_safetensors requires an attached GemmaModel");
+    }
+
+    model_->init_lora_modules();
+    num_layers_ = model_->config().num_hidden_layers;
+
+    LoRAState state = LoraSaver::load_safetensors(path);
+    struct LoadedSlice {
+        int layer = -1;
+        std::string target;
+        TensorPtr A;
+        TensorPtr B;
+    };
+
+    std::unordered_map<std::string, LoadedSlice> grouped_slices;
+    for (const auto& kv : state.tensors) {
+        int layer = -1;
+        std::string target;
+        std::string ab;
+        if (!LoraSaver::parse_peft_key(kv.first, layer, target, ab)) {
+            continue;
+        }
+        if (layer < 0 || layer >= num_layers_) {
+            throw std::runtime_error("GemmaLoraInjector::load_lora_safetensors layer out of range: " +
+                                     std::to_string(layer));
+        }
+
+        std::string group_key = std::to_string(layer) + ":" + target;
+        auto& slice = grouped_slices[group_key];
+        slice.layer = layer;
+        slice.target = target;
+        if (ab == "A") {
+            slice.A = kv.second;
+        } else if (ab == "B") {
+            slice.B = kv.second;
+        }
+    }
+
+    for (int layer = 0; layer < num_layers_; ++layer) {
+        clear_lora_modules(model_->get_block(layer));
+    }
+
+    float effective_rank = (state.rank > 0) ? static_cast<float>(state.rank) : 1.0f;
+    float scale = state.alpha / effective_rank;
+
+    std::vector<std::string> ordered_keys;
+    ordered_keys.reserve(grouped_slices.size());
+    for (const auto& kv : grouped_slices) {
+        ordered_keys.push_back(kv.first);
+    }
+    std::sort(ordered_keys.begin(), ordered_keys.end());
+
+    std::vector<std::string> loaded_modules;
+    std::vector<int> loaded_layers;
+    attached_modules_ = 0;
+    for (const auto& key : ordered_keys) {
+        auto& slice = grouped_slices.at(key);
+        if (!slice.A || !slice.B) {
+            throw std::runtime_error("GemmaLoraInjector::load_lora_safetensors missing A/B pair for " + key);
+        }
+
+        std::string canonical_target = canonicalize_save_target(slice.target);
+        std::string module_name = save_target_to_module_name(canonical_target);
+        if (module_name.empty()) {
+            throw std::runtime_error("GemmaLoraInjector::load_lora_safetensors unsupported target: " +
+                                     slice.target);
+        }
+
+        auto& block = model_->get_block(slice.layer);
+        auto ref = resolve_linear(block, module_name);
+        if (!ref.linear || !ref.weight) {
+            throw std::runtime_error("GemmaLoraInjector::load_lora_safetensors unresolved module: " +
+                                     module_name);
+        }
+
+        const auto& weight_shape = ref.weight->shape();
+        if (weight_shape.size() != 2) {
+            throw std::runtime_error("GemmaLoraInjector::load_lora_safetensors expected 2D weight for " +
+                                     module_name);
+        }
+
+        int out_cols = static_cast<int>(weight_shape[1]);
+        ref.linear->attach_lora(slice.A, slice.B, scale, 0, out_cols);
+        ref.linear->set_debug_name("layers_" + std::to_string(slice.layer) + "_" + module_name);
+        attached_modules_++;
+
+        if (std::find(loaded_modules.begin(), loaded_modules.end(), module_name) == loaded_modules.end()) {
+            loaded_modules.push_back(module_name);
+        }
+        if (std::find(loaded_layers.begin(), loaded_layers.end(), slice.layer) == loaded_layers.end()) {
+            loaded_layers.push_back(slice.layer);
+        }
+    }
+
+    std::sort(loaded_modules.begin(), loaded_modules.end());
+    std::sort(loaded_layers.begin(), loaded_layers.end());
+    spec_.rank = (state.rank > 0) ? state.rank : 1;
+    spec_.alpha = state.alpha;
+    spec_.dropout = state.dropout;
+    spec_.target_modules = loaded_modules;
+    spec_.layers = loaded_layers;
+
+    if (attached_modules_ == 0) {
+        throw std::runtime_error("GemmaLoraInjector::load_lora_safetensors found no attachable LoRA tensors in " +
+                                 path);
+    }
+
+    std::cout << "[GemmaLoraInjector] Loaded " << attached_modules_
+              << " LoRA modules from " << path << std::endl;
 }
 
 void GemmaLoraInjector::merge_all(GemmaModel& model) {

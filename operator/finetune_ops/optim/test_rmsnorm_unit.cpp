@@ -18,13 +18,6 @@ static TensorPtr make_random(const std::vector<int64_t>& shape, float scale = 1.
     return t;
 }
 
-static float l2(const TensorPtr& t) {
-    const float* p = t->data<float>();
-    double s = 0.0;
-    for (int64_t i = 0; i < t->numel(); ++i) s += static_cast<double>(p[i]) * static_cast<double>(p[i]);
-    return static_cast<float>(std::sqrt(s));
-}
-
 static float rel_diff(const TensorPtr& a, const TensorPtr& b) {
     auto da = a->data<float>();
     auto db = b->data<float>();
@@ -146,5 +139,4 @@ int main() {
     std::cout << "[FAIL]" << std::endl;
     return 1;
 }
-
 

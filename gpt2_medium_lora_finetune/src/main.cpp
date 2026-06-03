@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <algorithm>
+#include <filesystem>
 
 #include "finetune_ops/graph/gpt2_model.h"
 #include "finetune_ops/graph/safetensors_loader.h"
@@ -18,6 +19,7 @@
 #include "finetune_ops/core/lm_loss.h"
 #include "finetune_ops/core/ops.h"
 #include "finetune_ops/optim/adam.h"
+#include "finetune_ops/optim/smoke_utils.h"
 #include "finetune_ops/core/memory_manager.h"
 
 using namespace std;
@@ -54,6 +56,8 @@ struct CmdArgs {
     int save_every = 0;
     float ema_beta = 0.9f;
     int seed = 42;
+    bool synthetic_smoke = false;
+    int smoke_steps = 2;
 };
 
 static void print_usage(const char* prog) {
@@ -85,13 +89,14 @@ static void print_usage(const char* prog) {
          << "  --eval_batch_size N      Eval micro-batch size\n"
          << "  --save_every N           Checkpoint interval (steps)\n"
          << "  --ema_beta F             EMA smoothing factor\n"
-         << "  --seed N                 Random seed\n";
+         << "  --seed N                 Random seed\n"
+         << "  --synthetic_smoke        Run a self-contained 2-step smoke train\n"
+         << "  --smoke_steps N          Override synthetic smoke steps\n";
 }
 
 static CmdArgs parse_args(int argc, char** argv) {
     CmdArgs args;
-    args.data_dir = "/Users/tony/Documents/FT/data/wikitext2/wikitext-2-raw";
-    args.pretrained_dir = "/Users/tony/Documents/FT/gpt2_lora_finetune/pretrained/gpt2";
+    args.data_dir = "data/wikitext2/wikitext-2-raw";
 
     for (int i = 1; i < argc; ++i) {
         string k = argv[i];
@@ -127,6 +132,8 @@ static CmdArgs parse_args(int argc, char** argv) {
         else if (k == "--save_every") args.save_every = stoi(get_val("--save_every"));
         else if (k == "--ema_beta") args.ema_beta = stof(get_val("--ema_beta"));
         else if (k == "--seed") args.seed = stoi(get_val("--seed"));
+        else if (k == "--synthetic_smoke") args.synthetic_smoke = true;
+        else if (k == "--smoke_steps") args.smoke_steps = stoi(get_val("--smoke_steps"));
         else if (k == "--help" || k == "-h") { print_usage(argv[0]); exit(0); }
         else { cerr << "Unknown arg: " << k << endl; print_usage(argv[0]); exit(1); }
     }
@@ -149,13 +156,122 @@ static string make_checkpoint_path(const string& base, int step) {
     return ss.str();
 }
 
+static void require_file(const string& path, const string& desc) {
+    if (!std::filesystem::exists(path)) {
+        throw runtime_error(desc + " not found: " + path);
+    }
+}
+
+static int run_synthetic_smoke(const CmdArgs& args) {
+    cout << "\n========== GPT-2 LoRA Synthetic Smoke ==========\n" << endl;
+
+    GPT2Config cfg;
+    cfg.vocab_size = 64;
+    cfg.n_positions = max(16, args.seq_len + 2);
+    cfg.n_embd = 16;
+    cfg.n_layer = 1;
+    cfg.n_head = 4;
+    cfg.use_memory_efficient_attention = true;
+
+    GPT2Model model(cfg);
+    std::mt19937 rng(static_cast<uint32_t>(args.seed));
+    smoke::initialize_tiny_gpt2(model, rng);
+    model.tie_weights();
+
+    LoraSpec lora_spec;
+    lora_spec.rank = args.rank;
+    lora_spec.alpha = args.alpha;
+    lora_spec.dropout = args.lora_dropout;
+    lora_spec.split_qkv = false;
+    lora_spec.targets = {LoraTarget::AttnQKV, LoraTarget::AttnProj};
+
+    LoraInjector injector;
+    injector.inject(model, lora_spec);
+    auto trainable = injector.get_trainable_params();
+    if (trainable.empty()) {
+        throw runtime_error("synthetic smoke created no trainable LoRA parameters");
+    }
+
+    auto before = smoke::clone_tensors(trainable);
+    const int batch_size = max(1, min(args.batch_size, 2));
+    const int seq_len = max(4, min(args.seq_len, 8));
+    auto input_ids = smoke::make_input_ids(batch_size, seq_len, cfg.vocab_size, 1);
+    auto labels = smoke::make_shifted_labels(input_ids, cfg.vocab_size);
+    auto attention_mask = smoke::make_attention_mask(batch_size, seq_len);
+
+    AdamConfig opt_cfg;
+    opt_cfg.learning_rate = max(args.lr, 1e-2f);
+    opt_cfg.weight_decay = 0.0f;
+    Adam optimizer(opt_cfg);
+
+    vector<float> losses;
+    const int smoke_steps = max(1, args.smoke_steps);
+    for (int step = 0; step < smoke_steps; ++step) {
+        auto logits = model.forward(input_ids, attention_mask);
+        auto loss = lm_cross_entropy(logits, labels, -100, "mean");
+        if (!smoke::is_finite_scalar(loss)) {
+            throw runtime_error("non-finite loss during GPT-2 synthetic smoke");
+        }
+        losses.push_back(loss->data<float>()[0]);
+        loss->backward();
+
+        vector<TensorPtr> grads;
+        grads.reserve(trainable.size());
+        for (const auto& param : trainable) {
+            grads.push_back(param->grad());
+        }
+        double grad_norm = smoke::grad_l2_norm(grads);
+        if (!(grad_norm > 0.0) || !std::isfinite(grad_norm)) {
+            throw runtime_error("invalid gradient norm during GPT-2 synthetic smoke");
+        }
+
+        optimizer.step(trainable, grads);
+        smoke::zero_grads(trainable);
+        smoke::cleanup_step_memory();
+
+        cout << "[smoke step " << (step + 1) << "/" << smoke_steps
+             << "] loss=" << losses.back()
+             << " grad_norm=" << grad_norm << endl;
+    }
+
+    double param_delta = smoke::max_param_delta(before, trainable);
+    if (!args.lora_out.empty()) {
+        injector.save_lora_safetensors(args.lora_out);
+    }
+
+    cout << "[SyntheticSmoke] param_delta=" << param_delta << endl;
+    const bool ok = std::isfinite(param_delta) && param_delta > 0.0;
+    cout << (ok ? "[PASS]" : "[FAIL]") << endl;
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
 
     auto args = parse_args(argc, argv);
+    if (args.synthetic_smoke) {
+        try {
+            return run_synthetic_smoke(args);
+        } catch (const exception& e) {
+            cerr << "\n❌ Exception: " << e.what() << endl;
+            return 1;
+        }
+    }
 
     try {
+        if (args.pretrained_dir.empty()) {
+            throw runtime_error("--pretrained_dir is required unless --synthetic_smoke is used");
+        }
+        require_file(args.pretrained_dir + "/config.json", "GPT-2 config");
+        if (args.epochs <= 0 && args.steps <= 0) {
+            args.epochs = 1;
+        }
+        if (args.jsonl_train.empty() && args.jsonl_valid.empty() && args.jsonl_test.empty()) {
+            require_file(args.data_dir + "/wiki.train.raw", "WikiText-2 train split");
+            require_file(args.data_dir + "/wiki.valid.raw", "WikiText-2 valid split");
+        }
+
         cout << "\n========== GPT-2 LoRA Finetune (Pro) ==========\n" << endl;
         cout << "[Config]" << endl;
 #if defined(USE_BLAS)
@@ -201,9 +317,8 @@ int main(int argc, char** argv) {
         model.tie_weights();
         model.print_model_info();
 
-        string st_path = args.pretrained_dir + "/model.safetensors";
-        SafeTensorsReader reader(st_path);
-        reader.parse_header();
+        SafeTensorsModelReader reader(args.pretrained_dir);
+        reader.parse_headers();
         auto key_map = GPT2KeyMapper::generate_gpt2_mapping(cfg.n_layer);
         SafeTensorsLoadOptions load_opts;
         load_opts.transpose_linear = false;
@@ -552,5 +667,3 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
-
-

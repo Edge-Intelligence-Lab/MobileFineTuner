@@ -92,6 +92,7 @@ public:
     void init_lora_modules();
     GemmaBlockWeights& get_block(int i);
     const GemmaBlockWeights& get_block(int i) const;
+    std::vector<TensorPtr> parameters() const;
     std::vector<TensorPtr> get_lora_parameters() const;
     void merge_lora();
     void unmerge_lora();

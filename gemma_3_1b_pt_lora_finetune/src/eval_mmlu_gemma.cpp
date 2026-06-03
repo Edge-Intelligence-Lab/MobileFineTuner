@@ -74,12 +74,12 @@ static vector<string> parse_csv_line(const string& line) {
                 cur.push_back(c);
             }
         } else {
-            if (c == ',') { fields.emplace_back(move(cur)); cur.clear(); }
+            if (c == ',') { fields.emplace_back(std::move(cur)); cur.clear(); }
             else if (c == '"') { in_quotes = true; }
             else { cur.push_back(c); }
         }
     }
-    fields.emplace_back(move(cur));
+    fields.emplace_back(std::move(cur));
     return fields;
 }
 
@@ -125,7 +125,7 @@ static void read_mmlu_csv(const string& path, vector<MCQItem>& out_items) {
         item.D = trim_copy(f[idx_d]);
         string ans = trim_copy(f[idx_answer]);
         item.answer = ans.empty() ? 'A' : static_cast<char>(toupper(static_cast<unsigned char>(ans[0])));
-        out_items.emplace_back(move(item));
+        out_items.emplace_back(std::move(item));
     }
 }
 
@@ -164,8 +164,8 @@ int main(int argc, char** argv) {
 
         auto cfg = GemmaTextConfig::from_pretrained(args.pretrained_dir);
         GemmaModel model(cfg);
-        SafeTensorsReader reader(args.pretrained_dir + "/model.safetensors");
-        reader.parse_header();
+        SafeTensorsModelReader reader(args.pretrained_dir);
+        reader.parse_headers();
         auto mapping = GemmaKeyMapper::generate_gemma_mapping(cfg.num_hidden_layers);
         SafeTensorsLoadOptions load_opts;
         load_opts.verbose = false;
@@ -182,7 +182,7 @@ int main(int argc, char** argv) {
             if (!p.is_regular_file() || p.path().extension() != ".csv") continue;
             vector<MCQItem> items;
             read_mmlu_csv(p.path().string(), items);
-            for (auto& it : items) subj2items[it.subject].push_back(move(it));
+            for (auto& it : items) subj2items[it.subject].push_back(std::move(it));
         }
         cout << "[Eval] Loaded " << subj2items.size() << " subjects" << endl;
 
@@ -277,5 +277,3 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
-
-

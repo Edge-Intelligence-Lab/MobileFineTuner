@@ -158,6 +158,8 @@ public:
     float item() const {
         assert(numel() == 1);
         if (dtype_ == kFloat32) return *static_cast<const float*>(data_);
+        if (dtype_ == kFloat16) return fp16_bits_to_float32(*static_cast<const uint16_t*>(data_));
+        if (dtype_ == kBFloat16) return bf16_bits_to_float32(*static_cast<const uint16_t*>(data_));
 
         return 0.0f;
     }

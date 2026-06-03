@@ -60,7 +60,10 @@ public:
     explicit QwenModel(const QwenConfig& cfg);
     ~QwenModel() = default;
 
+    TensorPtr forward_hidden(const TensorPtr& input_ids, const TensorPtr& attention_mask = nullptr);
+    TensorPtr lm_head(const TensorPtr& hidden);
     TensorPtr forward(const TensorPtr& input_ids, const TensorPtr& attention_mask = nullptr);
+    const TensorPtr& embedding_weight() const { return embed_tokens_; }
 
     /**
      * @brief Initialize LoRA
@@ -69,8 +72,10 @@ public:
      * @param dropout LoRA dropout
      * @param qv_only If true, attach only q_proj and v_proj (default false = q/k/v/o)
      */
-    void init_lora(int rank = 8, float alpha = 16.0f, float dropout = 0.05f, bool qv_only = false);
+    void init_lora(int rank = 8, float alpha = 16.0f, float dropout = 0.05f,
+                   bool qv_only = false, uint64_t seed = 42);
     std::vector<TensorPtr> get_lora_parameters() const;
+    std::vector<TensorPtr> parameters() const;
     void freeze_base();
 
     void assign_weight(const std::string& key, const TensorPtr& tensor);
@@ -92,4 +97,3 @@ private:
 };
 
 }  // namespace ops
-

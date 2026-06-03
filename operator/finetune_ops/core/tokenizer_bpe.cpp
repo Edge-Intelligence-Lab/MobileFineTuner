@@ -159,7 +159,7 @@ struct Utf8Char {
 };
 
 // Decode a single UTF-8 character (tolerant: treat invalid sequences as single bytes)
-static Utf8Char decode_utf8(const std::string& text, size_t index) {
+[[maybe_unused]] static Utf8Char decode_utf8(const std::string& text, size_t index) {
     unsigned char c = static_cast<unsigned char>(text[index]);
     if ((c & 0x80) == 0) {
         return {c, 1};
@@ -181,11 +181,11 @@ static Utf8Char decode_utf8(const std::string& text, size_t index) {
     return {c, 1};
 }
 
-static bool is_newline_cp(uint32_t cp) {
+[[maybe_unused]] static bool is_newline_cp(uint32_t cp) {
     return cp == 0x0A || cp == 0x0D;
 }
 
-static bool is_whitespace_cp(uint32_t cp) {
+[[maybe_unused]] static bool is_whitespace_cp(uint32_t cp) {
     if (cp < 128) {
         return std::isspace(static_cast<unsigned char>(cp)) != 0;
     }
@@ -200,7 +200,7 @@ static bool is_whitespace_cp(uint32_t cp) {
     }
 }
 
-static bool is_number_cp(uint32_t cp) {
+[[maybe_unused]] static bool is_number_cp(uint32_t cp) {
     if (cp < 128) {
         return std::isdigit(static_cast<unsigned char>(cp)) != 0;
     }
@@ -210,7 +210,7 @@ static bool is_number_cp(uint32_t cp) {
     return false;
 }
 
-static bool is_letter_cp(uint32_t cp) {
+[[maybe_unused]] static bool is_letter_cp(uint32_t cp) {
     if (cp < 128) {
         return std::isalpha(static_cast<unsigned char>(cp)) != 0;
     }

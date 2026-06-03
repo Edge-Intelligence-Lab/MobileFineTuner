@@ -33,9 +33,9 @@ namespace ops {
 
 // Helper: register node with new engine (if enabled) or fallback to legacy
 namespace {
-    void register_backward(const TensorPtr& output,
-                          const std::vector<TensorPtr>& inputs,
-                          BackwardFunctionPtr backward_fn) {
+    [[maybe_unused]] void register_backward(const TensorPtr& output,
+                                            const std::vector<TensorPtr>& inputs,
+                                            BackwardFunctionPtr backward_fn) {
         #ifdef USE_NEW_AUTOGRAD_ENGINE
         try {
             autograd::Engine::instance().register_node(output, inputs, backward_fn);
@@ -47,6 +47,9 @@ namespace {
             throw;
         }
         #else
+        (void)output;
+        (void)inputs;
+        (void)backward_fn;
         // Legacy: set grad_fn that calls accumulate_gradient
         // (kept for backward compatibility)
         #endif
@@ -54,6 +57,46 @@ namespace {
 }
 
 namespace {
+
+    void matmul_fallback_nn(const float* A, const float* B, float* C,
+                            int64_t M, int64_t N, int64_t K) {
+        std::fill(C, C + M * N, 0.0f);
+        constexpr int64_t N_BLOCK = 64;
+        constexpr int64_t K_BLOCK = 64;
+
+        for (int64_t kk = 0; kk < K; kk += K_BLOCK) {
+            const int64_t kend = std::min(kk + K_BLOCK, K);
+            for (int64_t jj = 0; jj < N; jj += N_BLOCK) {
+                const int64_t jend = std::min(jj + N_BLOCK, N);
+                for (int64_t i = 0; i < M; ++i) {
+                    float* c_row = C + i * N;
+                    const float* a_row = A + i * K;
+                    for (int64_t k = kk; k < kend; ++k) {
+                        const float a = a_row[k];
+                        const float* b_row = B + k * N;
+                        for (int64_t j = jj; j < jend; ++j) {
+                            c_row[j] += a * b_row[j];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void matmul_fallback_nt(const float* A, const float* B, float* C,
+                            int64_t M, int64_t N, int64_t K) {
+        for (int64_t i = 0; i < M; ++i) {
+            const float* a_row = A + i * K;
+            for (int64_t j = 0; j < N; ++j) {
+                const float* b_row = B + j * K;
+                float sum = 0.0f;
+                for (int64_t k = 0; k < K; ++k) {
+                    sum += a_row[k] * b_row[k];
+                }
+                C[i * N + j] = sum;
+            }
+        }
+    }
 
     inline uint16_t float32_to_fp16(float value) {
         uint32_t bits;
@@ -110,6 +153,96 @@ namespace {
         float result;
         std::memcpy(&result, &bits, sizeof(result));
         return result;
+    }
+
+    bool is_lowp_float(DType dtype) {
+        return dtype == kFloat16 || dtype == kBFloat16;
+    }
+
+    float load_float_value(const void* data, DType dtype, int64_t idx) {
+        if (dtype == kFloat32) {
+            return static_cast<const float*>(data)[idx];
+        }
+        if (dtype == kFloat16) {
+            return fp16_to_float32(static_cast<const uint16_t*>(data)[idx]);
+        }
+        if (dtype == kBFloat16) {
+            return bf16_bits_to_float32(static_cast<const uint16_t*>(data)[idx]);
+        }
+        throw TensorError("load_float_value: unsupported dtype " + DTypeUtils::to_string(dtype));
+    }
+
+    void matmul_fallback_nn_mixed_b(const float* A, const void* B, DType b_dtype, float* C,
+                                    int64_t M, int64_t N, int64_t K) {
+        std::fill(C, C + M * N, 0.0f);
+        constexpr int64_t N_BLOCK = 64;
+        constexpr int64_t K_BLOCK = 64;
+        std::vector<float> b_tile(static_cast<size_t>(N_BLOCK * K_BLOCK));
+
+        for (int64_t kk = 0; kk < K; kk += K_BLOCK) {
+            const int64_t kend = std::min(kk + K_BLOCK, K);
+            const int64_t tile_k = kend - kk;
+            for (int64_t jj = 0; jj < N; jj += N_BLOCK) {
+                const int64_t jend = std::min(jj + N_BLOCK, N);
+                const int64_t tile_n = jend - jj;
+
+                for (int64_t k = kk; k < kend; ++k) {
+                    for (int64_t j = jj; j < jend; ++j) {
+                        b_tile[static_cast<size_t>((k - kk) * tile_n + (j - jj))] =
+                            load_float_value(B, b_dtype, k * N + j);
+                    }
+                }
+
+                for (int64_t i = 0; i < M; ++i) {
+                    float* c_row = C + i * N;
+                    const float* a_row = A + i * K;
+                    for (int64_t tk = 0; tk < tile_k; ++tk) {
+                        const float a = a_row[kk + tk];
+                        const float* b_row = b_tile.data() + tk * tile_n;
+                        for (int64_t tj = 0; tj < tile_n; ++tj) {
+                            c_row[jj + tj] += a * b_row[tj];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void matmul_fallback_nt_mixed_b(const float* A, const void* B, DType b_dtype, float* C,
+                                    int64_t M, int64_t N, int64_t K) {
+        std::fill(C, C + M * N, 0.0f);
+        constexpr int64_t N_BLOCK = 64;
+        constexpr int64_t K_BLOCK = 64;
+        std::vector<float> b_tile(static_cast<size_t>(N_BLOCK * K_BLOCK));
+
+        for (int64_t kk = 0; kk < K; kk += K_BLOCK) {
+            const int64_t kend = std::min(kk + K_BLOCK, K);
+            const int64_t tile_k = kend - kk;
+            for (int64_t jj = 0; jj < N; jj += N_BLOCK) {
+                const int64_t jend = std::min(jj + N_BLOCK, N);
+                const int64_t tile_n = jend - jj;
+
+                for (int64_t j = jj; j < jend; ++j) {
+                    for (int64_t k = kk; k < kend; ++k) {
+                        b_tile[static_cast<size_t>((j - jj) * tile_k + (k - kk))] =
+                            load_float_value(B, b_dtype, j * K + k);
+                    }
+                }
+
+                for (int64_t i = 0; i < M; ++i) {
+                    const float* a_row = A + i * K;
+                    float* c_row = C + i * N;
+                    for (int64_t tj = 0; tj < tile_n; ++tj) {
+                        const float* b_row = b_tile.data() + tj * tile_k;
+                        float sum = 0.0f;
+                        for (int64_t tk = 0; tk < tile_k; ++tk) {
+                            sum += a_row[kk + tk] * b_row[tk];
+                        }
+                        c_row[jj + tj] += sum;
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -498,6 +631,15 @@ TensorPtr matmul(const TensorPtr& a, const TensorPtr& b) {
     if (shape_a.size() < 2 || shape_b.size() < 2) {
         throw TensorError("matmul requires tensors with at least 2 dimensions");
     }
+    if (a->dtype() != kFloat32) {
+        throw TensorError("matmul: left operand must be float32 for mixed-precision CPU kernels");
+    }
+    if (b->dtype() != kFloat32 && !is_lowp_float(b->dtype())) {
+        throw TensorError("matmul: unsupported right operand dtype " + DTypeUtils::to_string(b->dtype()));
+    }
+    if (is_lowp_float(b->dtype()) && b->requires_grad()) {
+        throw TensorError("matmul: low-precision trainable right operand is not supported; keep trainable weights FP32");
+    }
 
     int64_t m = shape_a[shape_a.size() - 2];
     int64_t k = shape_a[shape_a.size() - 1];
@@ -539,37 +681,32 @@ TensorPtr matmul(const TensorPtr& a, const TensorPtr& b) {
     result_shape[result_shape.size() - 2] = m;
     result_shape[result_shape.size() - 1] = n;
 
-    auto result = zeros(result_shape, a->dtype(), a->device());
+    auto result = zeros(result_shape, kFloat32, a->device());
 
-    // Pure C++ matmul implementation
-    auto naive_matmul = [](const float* A, const float* B, float* C, int64_t m, int64_t n, int64_t k) {
-        for (int64_t i = 0; i < m; ++i) {
-            for (int64_t j = 0; j < n; ++j) {
-                float sum = 0.0f;
-                for (int64_t p = 0; p < k; ++p) {
-                    sum += A[i * k + p] * B[p * n + j];
-                }
-                C[i * n + j] = sum;
-            }
-        }
-    };
-    
     if (shape_a.size() == 2 && shape_b.size() == 2) {
         const float* data_a = a->data<float>();
-        const float* data_b = b->data<float>();
+        const void* data_b = b->data_ptr();
         float* result_data = result->data<float>();
         #ifdef USE_BLAS
         // Row-major GEMM: C[m,n] = A[m,k] * B[k,n]
-        cblas_sgemm(CblasRowMajor,
-                    CblasNoTrans, CblasNoTrans,
-                    (int)m, (int)n, (int)k,
-                    1.0f,
-                    data_a, (int)k,
-                    data_b, (int)n,
-                    0.0f,
-                    result_data, (int)n);
+        if (b->dtype() == kFloat32) {
+            cblas_sgemm(CblasRowMajor,
+                        CblasNoTrans, CblasNoTrans,
+                        (int)m, (int)n, (int)k,
+                        1.0f,
+                        data_a, (int)k,
+                        static_cast<const float*>(data_b), (int)n,
+                        0.0f,
+                        result_data, (int)n);
+        } else {
+            matmul_fallback_nn_mixed_b(data_a, data_b, b->dtype(), result_data, m, n, k);
+        }
         #else
-        naive_matmul(data_a, data_b, result_data, m, n, k);
+        if (b->dtype() == kFloat32) {
+            matmul_fallback_nn(data_a, static_cast<const float*>(data_b), result_data, m, n, k);
+        } else {
+            matmul_fallback_nn_mixed_b(data_a, data_b, b->dtype(), result_data, m, n, k);
+        }
         #endif
     } else {
         // 🔧 Fix: handle all leading batch dimensions, not just the first
@@ -589,7 +726,7 @@ TensorPtr matmul(const TensorPtr& a, const TensorPtr& b) {
         int64_t matrix_size_result = a_rows * b_cols;
 
         const float* data_a = a->data<float>();
-        const float* data_b = b->data<float>();
+        const char* data_b = static_cast<const char*>(b->data_ptr());
         float* result_data = result->data<float>();
 
         // Check whether B carries the same batch dimensions
@@ -602,25 +739,59 @@ TensorPtr matmul(const TensorPtr& a, const TensorPtr& b) {
                 }
             }
         }
-        
-        for (int64_t batch = 0; batch < total_batches; ++batch) {
-            const float* batch_a = data_a + batch * matrix_size_a;
-            const float* batch_b = b_has_batch ? 
-                                  data_b + batch * matrix_size_b : 
-                                  data_b;
-            float* batch_result = result_data + batch * matrix_size_result;
+
+        if (!b_has_batch) {
+            const int64_t flat_rows = total_batches * a_rows;
             #ifdef USE_BLAS
-            cblas_sgemm(CblasRowMajor,
-                        CblasNoTrans, CblasNoTrans,
-                        (int)a_rows, (int)b_cols, (int)a_cols,
-                        1.0f,
-                        batch_a, (int)a_cols,
-                        batch_b, (int)b_cols,
-                        0.0f,
-                        batch_result, (int)b_cols);
+            if (b->dtype() == kFloat32) {
+                cblas_sgemm(CblasRowMajor,
+                            CblasNoTrans, CblasNoTrans,
+                            (int)flat_rows, (int)b_cols, (int)a_cols,
+                            1.0f,
+                            data_a, (int)a_cols,
+                            static_cast<const float*>(b->data_ptr()), (int)b_cols,
+                            0.0f,
+                            result_data, (int)b_cols);
+            } else {
+                matmul_fallback_nn_mixed_b(data_a, b->data_ptr(), b->dtype(),
+                                           result_data, flat_rows, b_cols, a_cols);
+            }
             #else
-            naive_matmul(batch_a, batch_b, batch_result, a_rows, b_cols, a_cols);
+            if (b->dtype() == kFloat32) {
+                matmul_fallback_nn(data_a, static_cast<const float*>(b->data_ptr()),
+                                   result_data, flat_rows, b_cols, a_cols);
+            } else {
+                matmul_fallback_nn_mixed_b(data_a, b->data_ptr(), b->dtype(),
+                                           result_data, flat_rows, b_cols, a_cols);
+            }
             #endif
+        } else {
+            for (int64_t batch = 0; batch < total_batches; ++batch) {
+                const float* batch_a = data_a + batch * matrix_size_a;
+                const void* batch_b =
+                    data_b + static_cast<size_t>(batch * matrix_size_b) * DTypeUtils::size_of(b->dtype());
+                float* batch_result = result_data + batch * matrix_size_result;
+                #ifdef USE_BLAS
+                if (b->dtype() == kFloat32) {
+                    cblas_sgemm(CblasRowMajor,
+                                CblasNoTrans, CblasNoTrans,
+                                (int)a_rows, (int)b_cols, (int)a_cols,
+                                1.0f,
+                                batch_a, (int)a_cols,
+                                static_cast<const float*>(batch_b), (int)b_cols,
+                                0.0f,
+                                batch_result, (int)b_cols);
+                } else {
+                    matmul_fallback_nn_mixed_b(batch_a, batch_b, b->dtype(), batch_result, a_rows, b_cols, a_cols);
+                }
+                #else
+                if (b->dtype() == kFloat32) {
+                    matmul_fallback_nn(batch_a, static_cast<const float*>(batch_b), batch_result, a_rows, b_cols, a_cols);
+                } else {
+                    matmul_fallback_nn_mixed_b(batch_a, batch_b, b->dtype(), batch_result, a_rows, b_cols, a_cols);
+                }
+                #endif
+            }
         }
     }
 
@@ -667,12 +838,21 @@ TensorPtr matmul_rhs_T(const TensorPtr& a, const TensorPtr& b) {
     if (shape_a.size() < 2) {
         throw TensorError("matmul_rhs_T: a must be at least 2D");
     }
+    if (a->dtype() != kFloat32) {
+        throw TensorError("matmul_rhs_T: left operand must be float32 for mixed-precision CPU kernels");
+    }
+    if (b->dtype() != kFloat32 && !is_lowp_float(b->dtype())) {
+        throw TensorError("matmul_rhs_T: unsupported right operand dtype " + DTypeUtils::to_string(b->dtype()));
+    }
+    if (is_lowp_float(b->dtype()) && b->requires_grad()) {
+        throw TensorError("matmul_rhs_T: low-precision trainable right operand is not supported; keep trainable weights FP32");
+    }
     
     int64_t n = shape_b[0];
     int64_t k_b = shape_b[1];
     
     const float* data_a = a->data<float>();
-    const float* data_b = b->data<float>();
+    const void* data_b = b->data_ptr();
     
     if (shape_a.size() == 2) {
         // 2D: a[M,K] @ b[N,K]^T = result[M,N]
@@ -684,29 +864,28 @@ TensorPtr matmul_rhs_T(const TensorPtr& a, const TensorPtr& b) {
                              " but B has K=" + std::to_string(k_b));
         }
         
-        auto result = zeros({m, n}, a->dtype(), a->device());
+        auto result = zeros({m, n}, kFloat32, a->device());
         float* result_data = result->data<float>();
         
         #ifdef USE_BLAS
         // Row-major: C[m,n] = A[m,k] * B[n,k]^T  => NoTrans x Trans
-        cblas_sgemm(CblasRowMajor,
-                    CblasNoTrans, CblasTrans,
-                    (int)m, (int)n, (int)k_a,
-                    1.0f,
-                    data_a, (int)k_a,
-                    data_b, (int)k_b,
-                    0.0f,
-                    result_data, (int)n);
+        if (b->dtype() == kFloat32) {
+            cblas_sgemm(CblasRowMajor,
+                        CblasNoTrans, CblasTrans,
+                        (int)m, (int)n, (int)k_a,
+                        1.0f,
+                        data_a, (int)k_a,
+                        static_cast<const float*>(data_b), (int)k_b,
+                        0.0f,
+                        result_data, (int)n);
+        } else {
+            matmul_fallback_nt_mixed_b(data_a, data_b, b->dtype(), result_data, m, n, k_a);
+        }
         #else
-        // Pure C++ matmul_rhs_T: C[m,n] = A[m,k] @ B[n,k]^T
-        for (int64_t i = 0; i < m; ++i) {
-            for (int64_t j = 0; j < n; ++j) {
-                float sum = 0.0f;
-                for (int64_t p = 0; p < k_a; ++p) {
-                    sum += data_a[i * k_a + p] * data_b[j * k_b + p];
-                }
-                result_data[i * n + j] = sum;
-            }
+        if (b->dtype() == kFloat32) {
+            matmul_fallback_nt(data_a, static_cast<const float*>(data_b), result_data, m, n, k_a);
+        } else {
+            matmul_fallback_nt_mixed_b(data_a, data_b, b->dtype(), result_data, m, n, k_a);
         }
         #endif
         
@@ -717,14 +896,18 @@ TensorPtr matmul_rhs_T(const TensorPtr& a, const TensorPtr& b) {
             register_backward(result, {a, b}, backward_fn);
         }
         #else
-        if (a->requires_grad()) {
+        if (a->requires_grad() || b->requires_grad()) {
             result->set_requires_grad(true);
-            result->set_grad_fn([a, b](const TensorPtr& grad_output) -> std::vector<TensorPtr> {
-                auto grad_a = matmul(grad_output, b);
-                if (a->requires_grad()) {
-                    accumulate_gradient(a, grad_a);
+            auto backward_fn = std::make_shared<MatmulRhsTBackward>(a, b);
+            result->set_grad_fn([backward_fn, a, b](const TensorPtr& grad_output) -> std::vector<TensorPtr> {
+                auto grads = backward_fn->apply(grad_output);
+                if (a->requires_grad() && grads.size() > 0 && grads[0]) {
+                    accumulate_gradient(a, grads[0]);
                 }
-                return {};
+                if (b->requires_grad() && grads.size() > 1 && grads[1]) {
+                    accumulate_gradient(b, grads[1]);
+                }
+                return grads;
             });
         }
         #endif
@@ -735,7 +918,7 @@ TensorPtr matmul_rhs_T(const TensorPtr& a, const TensorPtr& b) {
         // bybatchprocess
         auto result_shape = shape_a;
         result_shape[result_shape.size() - 1] = n;
-        auto result = zeros(result_shape, a->dtype(), a->device());
+        auto result = zeros(result_shape, kFloat32, a->device());
         float* result_data = result->data<float>();
         
         int64_t m = shape_a[shape_a.size() - 2];
@@ -756,24 +939,23 @@ TensorPtr matmul_rhs_T(const TensorPtr& a, const TensorPtr& b) {
             float* batch_result = result_data + batch * (m * n);
             
             #ifdef USE_BLAS
-            cblas_sgemm(CblasRowMajor,
-                        CblasNoTrans, CblasTrans,
-                        (int)m, (int)n, (int)k_a,
-                        1.0f,
-                        batch_a, (int)k_a,
-                        data_b, (int)k_b,
-                        0.0f,
-                        batch_result, (int)n);
+            if (b->dtype() == kFloat32) {
+                cblas_sgemm(CblasRowMajor,
+                            CblasNoTrans, CblasTrans,
+                            (int)m, (int)n, (int)k_a,
+                            1.0f,
+                            batch_a, (int)k_a,
+                            static_cast<const float*>(data_b), (int)k_b,
+                            0.0f,
+                            batch_result, (int)n);
+            } else {
+                matmul_fallback_nt_mixed_b(batch_a, data_b, b->dtype(), batch_result, m, n, k_a);
+            }
             #else
-            // Pure C++ batch matmul_rhs_T
-            for (int64_t i = 0; i < m; ++i) {
-                for (int64_t j = 0; j < n; ++j) {
-                    float sum = 0.0f;
-                    for (int64_t p = 0; p < k_a; ++p) {
-                        sum += batch_a[i * k_a + p] * data_b[j * k_b + p];
-                    }
-                    batch_result[i * n + j] = sum;
-                }
+            if (b->dtype() == kFloat32) {
+                matmul_fallback_nt(batch_a, static_cast<const float*>(data_b), batch_result, m, n, k_a);
+            } else {
+                matmul_fallback_nt_mixed_b(batch_a, data_b, b->dtype(), batch_result, m, n, k_a);
             }
             #endif
         }
@@ -785,14 +967,18 @@ TensorPtr matmul_rhs_T(const TensorPtr& a, const TensorPtr& b) {
             register_backward(result, {a, b}, backward_fn);
         }
         #else
-        if (a->requires_grad()) {
+        if (a->requires_grad() || b->requires_grad()) {
             result->set_requires_grad(true);
-            result->set_grad_fn([a, b](const TensorPtr& grad_output) -> std::vector<TensorPtr> {
-                auto grad_a = matmul(grad_output, b);
-                if (a->requires_grad()) {
-                    accumulate_gradient(a, grad_a);
+            auto backward_fn = std::make_shared<MatmulRhsTBackward>(a, b);
+            result->set_grad_fn([backward_fn, a, b](const TensorPtr& grad_output) -> std::vector<TensorPtr> {
+                auto grads = backward_fn->apply(grad_output);
+                if (a->requires_grad() && grads.size() > 0 && grads[0]) {
+                    accumulate_gradient(a, grads[0]);
                 }
-                return {};
+                if (b->requires_grad() && grads.size() > 1 && grads[1]) {
+                    accumulate_gradient(b, grads[1]);
+                }
+                return grads;
             });
         }
         #endif
@@ -821,9 +1007,9 @@ TensorPtr transpose(const TensorPtr& tensor, int dim0, int dim1) {
     // createresulttensor
     auto result = zeros(new_shape, tensor->dtype(), tensor->device());
     
-    // executetranspose
-    const float* src_data = tensor->data<float>();
-    float* dst_data = result->data<float>();
+    const size_t elem_size = DTypeUtils::size_of(tensor->dtype());
+    const char* src_data = static_cast<const char*>(tensor->data_ptr());
+    char* dst_data = static_cast<char*>(result->data_ptr());
     
         // [Translated]
     std::vector<int64_t> strides_src(ndim), strides_dst(ndim);
@@ -861,7 +1047,9 @@ TensorPtr transpose(const TensorPtr& tensor, int dim0, int dim1) {
             src_idx += indices[i] * strides_src[i];
         }
         
-        dst_data[linear_idx] = src_data[src_idx];
+        std::memcpy(dst_data + static_cast<size_t>(linear_idx) * elem_size,
+                    src_data + static_cast<size_t>(src_idx) * elem_size,
+                    elem_size);
     }
     
     // settingsgradientpropagate
@@ -2109,14 +2297,12 @@ TensorPtr repeat_kv_heads(const TensorPtr& kv, int repeat_factor) {
         }
     }
     
-    // 🔧 Critical fix: force requires_grad so gradients propagate correctly
-    // In GQA, repeated K/V must support backpropagation
-    result->set_requires_grad(true);
-    #ifdef USE_NEW_AUTOGRAD_ENGINE
-    auto backward_fn = std::make_shared<RepeatKVHeadsBackward>(repeat_factor);
-    register_backward(result, {kv}, backward_fn);
-    #else
     if (kv->requires_grad()) {
+        result->set_requires_grad(true);
+        #ifdef USE_NEW_AUTOGRAD_ENGINE
+        auto backward_fn = std::make_shared<RepeatKVHeadsBackward>(repeat_factor);
+        register_backward(result, {kv}, backward_fn);
+        #else
         result->set_grad_fn([kv, repeat_factor](const TensorPtr& grad_output) -> std::vector<TensorPtr> {
             // Legacy: sum repeats back
             const auto& gshape = grad_output->shape();
@@ -2142,8 +2328,8 @@ TensorPtr repeat_kv_heads(const TensorPtr& kv, int repeat_factor) {
             accumulate_gradient(kv, grad_kv);
             return {grad_kv};
         });
+        #endif
     }
-    #endif
     
     return result;
 }
@@ -2175,10 +2361,11 @@ TensorPtr apply_rope(const TensorPtr& x, int seq_len, int head_dim, float rope_t
     std::memcpy(result_data, x_data, batch * heads * seq_len * head_dim * sizeof(float));
     
         // [Translated]
+    const int64_t half_dim = head_dim / 2;
     for (int64_t b = 0; b < batch; ++b) {
         for (int64_t h = 0; h < heads; ++h) {
             for (int64_t pos = 0; pos < seq_len; ++pos) {
-                for (int64_t d = 0; d < head_dim / 2; ++d) {
+                for (int64_t d = 0; d < half_dim; ++d) {
                     // Calculate frequency
                     float freq = 1.0f / std::pow(rope_theta, 2.0f * d / head_dim);
                     float angle = pos * freq;
@@ -2189,8 +2376,10 @@ TensorPtr apply_rope(const TensorPtr& x, int seq_len, int head_dim, float rope_t
                     int64_t idx_base = b * heads * seq_len * head_dim + 
                                       h * seq_len * head_dim + 
                                       pos * head_dim;
-                    int64_t idx1 = idx_base + 2 * d;
-                    int64_t idx2 = idx_base + 2 * d + 1;
+                    // Match HF/Qwen rotate_half layout: pair the first half of the head
+                    // with the second half, not adjacent even/odd dimensions.
+                    int64_t idx1 = idx_base + d;
+                    int64_t idx2 = idx_base + half_dim + d;
                     
                     // boundarycheck
                     if (idx1 < batch * heads * seq_len * head_dim && 
@@ -2724,11 +2913,29 @@ TensorPtr cast(const TensorPtr& tensor, DType target_dtype) {
         return result;
     }
 
+    if (src_dtype == kFloat32 && target_dtype == kBFloat16) {
+        const float* src = tensor->data<float>();
+        uint16_t* dst = result->data<uint16_t>();
+        for (int64_t i = 0; i < tensor->numel(); ++i) {
+            dst[i] = float32_to_bf16_bits(src[i]);
+        }
+        return result;
+    }
+
     if (src_dtype == kFloat16 && target_dtype == kFloat32) {
         const uint16_t* src = tensor->data<uint16_t>();
         float* dst = result->data<float>();
         for (int64_t i = 0; i < tensor->numel(); ++i) {
             dst[i] = fp16_to_float32(src[i]);
+        }
+        return result;
+    }
+
+    if (src_dtype == kBFloat16 && target_dtype == kFloat32) {
+        const uint16_t* src = tensor->data<uint16_t>();
+        float* dst = result->data<float>();
+        for (int64_t i = 0; i < tensor->numel(); ++i) {
+            dst[i] = bf16_bits_to_float32(src[i]);
         }
         return result;
     }

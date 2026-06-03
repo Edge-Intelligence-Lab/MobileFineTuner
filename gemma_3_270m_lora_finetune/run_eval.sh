@@ -1,21 +1,23 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 set -euo pipefail
-REPO_ROOT="$(cd "$(dirname "$0")"/.. && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR"/.. && pwd)"
+source "$REPO_ROOT/scripts/lib/asset_paths.sh"
 PY="${PYTHON:-python3}"
 
-PRETRAINED="$(cd "$(dirname "$0")" && pwd)/pretrained"
-OUT_DIR="$(cd "$(dirname "$0")" && pwd)/outputs"
-MMLU_ROOT="$REPO_ROOT/data/mmlu/data"
+PRETRAINED="${GEMMA_270M_MODEL_DIR:-$(mf_resolve_model_dir gemma_270m "$SCRIPT_DIR/pretrained")}"
+OUT_DIR="$SCRIPT_DIR/outputs"
+MMLU_ROOT="${MMLU_ROOT:-$(mf_resolve_mmlu_dir "$REPO_ROOT")}"
 mkdir -p "$OUT_DIR"
 
 SPLIT="${SPLIT:-dev}"     # dev or test
 FEWSHOT="${FEWSHOT:-0}"   # commonly 5 for test
 
 # Use local C++ evaluation binary (Gemma)
-LOCAL_BIN="$(cd "$(dirname "$0")" && pwd)/build/eval_mmlu_gemma"
+LOCAL_BIN="$SCRIPT_DIR/build/eval_mmlu_gemma"
 if [ ! -x "$LOCAL_BIN" ]; then
   echo "[Build] 構建本地二進位..."
-  "$(cd "$(dirname "$0")" && pwd)/build.sh"
+  "$SCRIPT_DIR/build.sh"
 fi
 
 echo "[Eval] pretrained=$PRETRAINED"
@@ -29,5 +31,3 @@ echo "[Eval] split=$SPLIT fewshot=$FEWSHOT"
   --out "$OUT_DIR/eval_${SPLIT}_${FEWSHOT}shot.jsonl"
 
 echo "[Eval] Results saved to: $OUT_DIR/eval_${SPLIT}_${FEWSHOT}shot.jsonl"
-
-

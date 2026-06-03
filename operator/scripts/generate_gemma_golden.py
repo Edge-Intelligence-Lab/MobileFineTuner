@@ -16,6 +16,35 @@ def load_config(path: str):
         return json.load(f)
 
 
+def load_safetensors_snapshot(model_dir: str):
+    single_path = os.path.join(model_dir, "model.safetensors")
+    if os.path.isfile(single_path):
+        return load_file(single_path)
+
+    index_path = os.path.join(model_dir, "model.safetensors.index.json")
+    if not os.path.isfile(index_path):
+        raise FileNotFoundError(
+            f"Expected model.safetensors or model.safetensors.index.json in {model_dir}"
+        )
+
+    with open(index_path, "r", encoding="utf-8") as f:
+        index = json.load(f)
+    weight_map = index.get("weight_map", {})
+    if not weight_map:
+        raise ValueError(f"No weight_map found in {index_path}")
+
+    merged = {}
+    for shard_name in sorted(set(weight_map.values())):
+        shard_path = os.path.join(model_dir, shard_name)
+        if not os.path.isfile(shard_path):
+            raise FileNotFoundError(f"Missing SafeTensors shard listed in index: {shard_path}")
+        for key, value in load_file(shard_path).items():
+            if key in merged:
+                raise ValueError(f"Duplicate tensor key across shards: {key}")
+            merged[key] = value
+    return merged
+
+
 def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float):
     norm = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + eps)
     return (x * norm) * (1.0 + weight)
@@ -78,8 +107,7 @@ class GemmaReferenceModel:
         self.rms_eps = self.cfg["rms_norm_eps"]
         self.scaling = self.cfg["query_pre_attn_scalar"] ** -0.5
 
-        weights_path = os.path.join(model_dir, "model.safetensors")
-        raw = load_file(weights_path)
+        raw = load_safetensors_snapshot(model_dir)
         self.weights = {k: v.to(torch.float32).to(device) for k, v in raw.items()}
 
     def embed(self, input_ids: torch.Tensor):

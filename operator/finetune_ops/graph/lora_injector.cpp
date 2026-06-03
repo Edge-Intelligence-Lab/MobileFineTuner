@@ -4,6 +4,7 @@
  */
 
 #include "lora_injector.h"
+#include "lora_saver.h"
 #include "../core/ops.h"
 #include <iostream>
 #include <random>
@@ -46,6 +47,7 @@ void LoraState::init(int64_t in_features, int64_t out_features,
 // ============================================================================
 
 void LoraInjector::inject(GPT2Model& model, const LoraSpec& spec) {
+    model_ = &model;
     spec_ = spec;
     num_layers_ = model.config().n_layer;
     
@@ -221,6 +223,13 @@ void LoraInjector::merge() {
         std::cout << "[LoraInjector] Already merged, skipping" << std::endl;
         return;
     }
+
+    if (hooks_.empty() && model_) {
+        merge_all(*model_);
+        merged_ = true;
+        std::cout << "[LoraInjector] Merged LoRA modules via attached GPT2Model" << std::endl;
+        return;
+    }
     
     for (auto& hook : hooks_) {
         if (!hook.W_ptr || !hook.state.enabled) continue;
@@ -251,6 +260,13 @@ void LoraInjector::merge() {
 void LoraInjector::unmerge() {
     if (!merged_) {
         std::cout << "[LoraInjector] Not merged, skipping unmerge" << std::endl;
+        return;
+    }
+
+    if (hooks_.empty() && model_) {
+        unmerge_all(*model_);
+        merged_ = false;
+        std::cout << "[LoraInjector] Unmerged LoRA modules via attached GPT2Model" << std::endl;
         return;
     }
     
@@ -285,6 +301,10 @@ void LoraInjector::unmerge() {
 // ============================================================================
 
 std::vector<TensorPtr> LoraInjector::collect_lora_parameters() const {
+    if (hooks_.empty() && model_) {
+        return model_->get_lora_parameters();
+    }
+
     std::vector<TensorPtr> params;
     params.reserve(hooks_.size() * 2);
     
@@ -339,6 +359,26 @@ TensorPtr LoraInjector::lora_linear_forward(const TensorPtr& x,
 // ============================================================================
 
 void LoraInjector::print_info() const {
+    if (hooks_.empty() && model_) {
+        auto params = model_->get_lora_parameters();
+        int64_t total_lora_params = 0;
+        for (const auto& param : params) {
+            total_lora_params += param->numel();
+        }
+
+        std::cout << "\n[LoRA Injector Info]" << std::endl;
+        std::cout << "  Injection backend: LoRALinear" << std::endl;
+        std::cout << "  Rank: " << spec_.rank << std::endl;
+        std::cout << "  Alpha: " << spec_.alpha << std::endl;
+        std::cout << "  Scale: " << (spec_.alpha / spec_.rank) << std::endl;
+        std::cout << "  Dropout: " << spec_.dropout << std::endl;
+        std::cout << "  Split QKV: " << (spec_.split_qkv ? "true" : "false") << std::endl;
+        std::cout << "  Merged: " << (merged_ ? "true" : "false") << std::endl;
+        std::cout << "  Total LoRA params: " << total_lora_params << std::endl;
+        std::cout << "  Trainable param count: " << params.size() << std::endl;
+        return;
+    }
+
     std::cout << "\n[LoRA Injector Info]" << std::endl;
     std::cout << "  Total hooks: " << hooks_.size() << std::endl;
     std::cout << "  Rank: " << spec_.rank << std::endl;
@@ -358,6 +398,10 @@ void LoraInjector::print_info() const {
 }
 
 std::vector<TensorPtr> LoraInjector::get_trainable_params() {
+    if (hooks_.empty() && model_) {
+        return model_->get_lora_parameters();
+    }
+
     std::vector<TensorPtr> params;
     for (const auto& hook : hooks_) {
         if (hook.state.enabled) {
@@ -369,19 +413,31 @@ std::vector<TensorPtr> LoraInjector::get_trainable_params() {
 }
 
 // ============================================================================
-// Save / Load (TODO: complete safetensors serialization)
+// Save / Load
 // ============================================================================
 
 void LoraInjector::save_lora_safetensors(const std::string& path) const {
-    // TODO: implement safetensors writing
-    // Key format: lora.blocks.{i}.{target}.{q/k/v}.A, .B
-    // Metadata: meta.rank, meta.alpha, meta.dropout, meta.split_qkv
-    std::cout << "[LoraInjector] save_lora_safetensors: TODO (path=" << path << ")" << std::endl;
+    if (!model_) {
+        throw std::logic_error("LoraInjector::save_lora_safetensors requires an attached GPT2Model");
+    }
+    LoraSaver::save_safetensors(path, *model_, spec_);
 }
 
 void LoraInjector::load_lora_safetensors(const std::string& path) {
-    // TODO: load LoRA A/B from safetensors
-    std::cout << "[LoraInjector] load_lora_safetensors: TODO (path=" << path << ")" << std::endl;
+    if (!model_) {
+        throw std::logic_error("LoraInjector::load_lora_safetensors requires an attached GPT2Model");
+    }
+    model_->init_lora_modules();
+    auto state = LoraSaver::load_safetensors(path);
+    spec_.rank = state.rank;
+    spec_.alpha = state.alpha;
+    spec_.dropout = state.dropout;
+    spec_.split_qkv = state.split_qkv;
+    if (!state.targets.empty()) {
+        spec_.targets = state.targets;
+    }
+    LoraSaver::attach_from_state(*model_, state);
+    merged_ = false;
 }
 
 void LoraInjector::merge_all(GPT2Model& model) {
@@ -407,4 +463,3 @@ void LoraInjector::unmerge_all(GPT2Model& model) {
 }
 
 }  // namespace ops
-

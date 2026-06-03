@@ -38,21 +38,10 @@ Unlike simulation-based or desktop-bound approaches, MobileFineTuner runs native
 ### Key Features
 
 - **Efficiency**: Pure C++ implementation with modular operators, automatic differentiation, and full backpropagation—no Python runtime or external ML frameworks required
-- **Scalability**: Supports multiple mainstream LLM architectures (GPT-2, Gemma) with flexible interfaces for custom training strategies and federated learning integration
+- **Scalability**: Supports multiple mainstream decoder-only LLM architectures (GPT-2, Gemma, Qwen) with reusable graph, tokenizer, dataset, and LoRA components
 - **Usability**: Simple high-level APIs that abstract away system complexity, enabling rapid prototyping and practical deployment
 - **Privacy-Preserving**: All training data remains on-device, complying with GDPR and user privacy expectations
-- **Resource-Aware**: Built-in memory and energy optimizations designed specifically for mobile constraints
-
-### System Optimizations
-
-**Memory Optimization**
-- ZeRO-inspired parameter sharding with LRU-based offloading to disk
-- Optional FP16 quantization for disk-stored parameters
-- Gradient accumulation for micro-batch training under tight memory budgets
-
-**Energy Optimization**
-- Energy-aware computation scheduler adapting to battery level and temperature
-- Dynamic throttling to reduce power draw during sustained training
+- **Resource-Aware**: Keeps model weights, datasets, run logs, adapters, and profiling output outside the source package; runtime scripts resolve assets through explicit environment variables
 
 ---
 
@@ -60,12 +49,10 @@ Unlike simulation-based or desktop-bound approaches, MobileFineTuner runs native
 
 - [Installation & Build](#installation--build)
 - [Quick Start](#quick-start)
+- [Model and Dataset Assets](#model-and-dataset-assets)
 - [Supported Models](#supported-models)
 - [Core Components](#core-components)
-- [Memory Optimization](#memory-optimization)
-- [Energy-Aware Training](#energy-aware-training)
 - [Evaluation](#evaluation)
-- [PyTorch Alignment](#pytorch-alignment)
 - [Benchmarks](#benchmarks)
 - [Project Structure](#project-structure)
 - [Citation](#citation)
@@ -86,18 +73,36 @@ Unlike simulation-based or desktop-bound approaches, MobileFineTuner runs native
 ### Build Instructions
 
 ```bash
-cd operators
-mkdir build && cd build
-cmake .. -DUSE_BLAS=ON -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
+cmake -S operator -B operator/build -DUSE_BLAS=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build operator/build -j4
+ctest --test-dir operator/build --output-on-failure
+cmake --install operator/build --prefix /tmp/mobilefinetuner-install
 ```
 
 **Build Outputs:**
 - `liboperators.a` - Core framework library
-- `gpt2_lora_finetune` - GPT-2 LoRA training CLI
-- `train_lora_gemma` - Gemma LoRA training CLI
-- `eval_ppl` - WikiText-2 perplexity evaluation
-- `eval_mmlu` - MMLU benchmark evaluation
+- self-contained operator tests such as `test_qkt_softmax_grad`, `test_repeat_kv_softmax_grad`, `test_lora_roundtrip`
+
+The default `operator/` build produces the reusable library and unit tests. Model-specific training/eval CLIs are built from the corresponding top-level model directories, such as `gpt2_small_lora_finetune/`, `gpt2_medium_lora_finetune/`, `gemma_3_270m_lora_finetune/`, `gemma_3_1b_pt_lora_finetune/`, and `qwen_lora_finetune/`.
+
+The install step exports CMake packages. New downstream projects should use the
+`MobileFineTuner` package name:
+
+```cmake
+find_package(MobileFineTuner REQUIRED)
+target_link_libraries(your_target PRIVATE MobileFineTuner::operators)
+```
+
+Use the stable umbrella header in new applications:
+
+```cpp
+#include "mobile_finetuner/mobile_finetuner.h"
+```
+
+See [docs/PUBLIC_API.md](docs/PUBLIC_API.md) for the public API boundary.
+
+The legacy package name is still available for existing consumers:
+`find_package(Operators REQUIRED)` and `Operators::operators`.
 
 ---
 
@@ -105,140 +110,182 @@ make -j$(nproc)
 
 ### 1. Prepare Data and Model
 
-Download WikiText-2 dataset and pretrained model:
-```bash
-# WikiText-2 raw text files
-mkdir -p data/wikitext2/wikitext-2-raw
-# Place wiki.train.raw, wiki.valid.raw, wiki.test.raw in the above directory
+MobileFineTuner does not bundle pretrained weights or benchmark datasets. This
+matches the PyTorch/Transformers convention: the framework ships code, and the
+application passes a local model/data path at runtime.
 
-# GPT-2 pretrained weights (HuggingFace format)
-# Place in gpt2_lora_finetune/pretrained/gpt2/
+Use shared asset roots for reproducible local runs:
+
+```bash
+export MFT_MODEL_ROOT=/path/to/mft-models
+export MFT_DATA_ROOT=/path/to/mft-data
 ```
 
-### 2. Run LoRA Fine-Tuning
+Expected layout:
+
+```text
+$MFT_MODEL_ROOT/
+  gpt2/
+  gpt2-medium/
+  gemma-3-270m/
+  gemma-3-1b-pt/
+  Qwen2.5-0.5B/
+
+$MFT_DATA_ROOT/
+  wikitext2/wikitext-2-raw/
+  mmlu/data/
+```
+
+Each model directory is a HuggingFace-style snapshot containing `config.json`,
+tokenizer files, and either `model.safetensors` or a HuggingFace sharded
+SafeTensors layout with `model.safetensors.index.json`. Per-model overrides such
+as `QWEN_MODEL_DIR`, `GPT2_SMALL_MODEL_DIR`, and `GEMMA_270M_MODEL_DIR` are also
+supported.
+
+To verify what this checkout will use on your machine:
+
+```bash
+bash scripts/check_local_assets.sh
+```
+
+See [docs/MODEL_ASSETS.md](docs/MODEL_ASSETS.md) for exact file requirements
+and download examples.
+
+### 2. Validate the Five Training Entrypoints
+
+Run the repo-level smoke suite before using real assets:
+
+```bash
+bash scripts/run_training_smoke.sh
+```
+
+This performs a two-step synthetic training pass for GPT-2 small, GPT-2 medium, Gemma 270M, Gemma 1B-PT, and Qwen.
+
+To run a one-step real-asset sanity pass across the five training entrypoints:
+
+```bash
+bash scripts/run_training_real_assets.sh
+```
+
+### 3. Run LoRA Fine-Tuning
+
 #### WikiText-2 LoRA
 - **GPT-2 Small (124M):**
   ```bash
-  ./build/gpt2_lora_finetune \
-    --data_dir data/wikitext2/wikitext-2-raw \
-    --pretrained_dir gpt2_small_lora_finetune/pretrained/gpt2 \
-    --lora_out runs/gpt2_small_wt2_lora.safetensors \
-    --epochs 1 --batch_size 4 --grad_accum_steps 2 --seq_len 128 \
-    --rank 8 --alpha 16 --lr 2e-4 --warmup_steps 100 \
-    --eval_interval 200 --clip_grad_norm 1.0
+  (
+    cd gpt2_small_lora_finetune &&
+    TRAIN_MODE=wt2 STEPS=200 BATCH_SIZE=4 GRAD_ACCUM_STEPS=2 ./run_train.sh
+  )
   ```
 - **GPT-2 Medium (355M):**
   ```bash
-  ./build/gpt2_lora_finetune \
-    --data_dir data/wikitext2/wikitext-2-raw \
-    --pretrained_dir gpt2_medium_lora_finetune/pretrained/gpt2-medium \
-    --lora_out runs/gpt2_medium_wt2_lora.safetensors \
-    --epochs 1 --batch_size 2 --grad_accum_steps 2 --seq_len 128 \
-    --rank 8 --alpha 16 --lr 2e-4 --warmup_steps 100
+  (
+    cd gpt2_medium_lora_finetune &&
+    TRAIN_MODE=wt2 STEPS=200 BATCH_SIZE=2 GRAD_ACCUM_STEPS=2 ./run_train.sh
+  )
   ```
 - **Gemma 270M:**
   ```bash
-  ./build/train_lora_gemma \
-    --model_dir gemma_3_270m_lora_finetune/pretrained \
-    --data_dir data/wikitext2/wikitext-2-raw \
-    --output_dir runs/gemma_270m_wt2_lora \
-    --epochs 1 --batch 4 --grad_accum 1 --seq_len 256 \
-    --learning_rate 2e-4 --warmup_ratio 0.03 \
-    --lora_r 8 --lora_alpha 32 --targets full
+  (
+    cd gemma_3_270m_lora_finetune &&
+    TRAIN_MODE=wt2 STEPS=200 BATCH_SIZE=4 GRAD_ACCUM_STEPS=1 ./run_train.sh
+  )
   ```
 - **Gemma 1B-PT:**
   ```bash
-  ./build/train_lora_gemma \
-    --model_dir gemma_3_1b_pt_lora_finetune/pretrained \
-    --data_dir data/wikitext2/wikitext-2-raw \
-    --output_dir runs/gemma_1b_wt2_lora \
-    --epochs 1 --batch 2 --grad_accum 2 --seq_len 256 \
-    --learning_rate 2e-4 --warmup_ratio 0.03 \
-    --lora_r 8 --lora_alpha 32 --targets full
+  (
+    cd gemma_3_1b_pt_lora_finetune &&
+    TRAIN_MODE=wt2 STEPS=200 BATCH_SIZE=2 GRAD_ACCUM_STEPS=2 ./run_train.sh
+  )
   ```
 - **Qwen2.5-0.5B:**
   ```bash
-  ./build/qwen_lora_finetune \
-    --data_dir data/wikitext2/wikitext-2-raw \
-    --pretrained_dir qwen_lora_finetune/pretrained \
-    --lora_out runs/qwen_wt2_lora.safetensors \
-    --seq_len 1024 --batch_size 1 --grad_accum_steps 1 \
-    --rank 8 --alpha 16 --lr 2e-4
+  (
+    cd qwen_lora_finetune &&
+    MAX_STEPS=200 BATCH_SIZE=1 GRAD_ACCUM_STEPS=1 ./run_wikitext.sh
+  )
   ```
 
-#### MMLU LoRA (masked JSONL)
-Data prep: in each model directory run `run_prepare_data.sh` (requires `transformers`) to generate `runs/mmlu_jsonl_*/{train,valid}.jsonl` with fields `ids` and `mask`.
+#### MMLU LoRA
+
+GPT-2 and Gemma consume masked JSONL prepared by `run_prepare_data.sh`. Qwen consumes the raw CSV tree under `data/mmlu/data` directly and does not use JSONL.
 
 - **GPT-2 Small / Medium:**
   ```bash
-  ./build/gpt2_lora_finetune \
-    --jsonl_train runs/mmlu_jsonl_gpt2_s128/train.jsonl \
-    --jsonl_valid runs/mmlu_jsonl_gpt2_s128/valid.jsonl \
-    --pretrained_dir gpt2_small_lora_finetune/pretrained/gpt2 \   # or medium directory
-    --lora_out runs/gpt2_mmlu_lora.safetensors \
-    --seq_len 128 --batch_size 8 --grad_accum_steps 1 \
-    --rank 8 --alpha 16 --lr 2e-4
+  (
+    cd gpt2_small_lora_finetune &&
+    ./run_prepare_data.sh &&
+    TRAIN_MODE=mmlu STEPS=200 ./run_train.sh
+  )
+  (
+    cd gpt2_medium_lora_finetune &&
+    ./run_prepare_data.sh &&
+    TRAIN_MODE=mmlu STEPS=200 ./run_train.sh
+  )
   ```
 - **Gemma 270M / 1B-PT:**
   ```bash
-  ./build/train_lora_gemma \
-    --model_dir gemma_3_1b_pt_lora_finetune/pretrained \   # or 270m directory
-    --jsonl_train runs/mmlu_jsonl_gemma1b_s128/train.jsonl \
-    --jsonl_valid runs/mmlu_jsonl_gemma1b_s128/valid.jsonl \
-    --output_dir runs/gemma_mmlu_lora \
-    --seq_len 128 --batch 8 --grad_accum 1 \
-    --learning_rate 2e-4 --warmup_ratio 0.03 \
-    --lora_r 8 --lora_alpha 32
+  (
+    cd gemma_3_270m_lora_finetune &&
+    ./run_prepare_data.sh &&
+    TRAIN_MODE=mmlu STEPS=200 ./run_train.sh
+  )
+  (
+    cd gemma_3_1b_pt_lora_finetune &&
+    ./run_prepare_data.sh &&
+    TRAIN_MODE=mmlu STEPS=200 ./run_train.sh
+  )
   ```
 - **Qwen2.5-0.5B:**
   ```bash
-  ./build/qwen_lora_finetune \
-    --jsonl_train runs/mmlu_jsonl_qwen/train.jsonl \
-    --jsonl_valid runs/mmlu_jsonl_qwen/valid.jsonl \
-    --pretrained_dir qwen_lora_finetune/pretrained \
-    --lora_out runs/qwen_mmlu_lora.safetensors \
-    --seq_len 128 --batch_size 8 --grad_accum_steps 1 \
-    --rank 8 --alpha 16 --lr 2e-4 --qv_only
+  (
+    cd qwen_lora_finetune &&
+    MAX_STEPS=150 BATCH_SIZE=8 ./run_mmlu.sh
+  )
   ```
 
 #### GPT-2 Small Full Fine-Tune (WikiText-2)
 ```bash
-./build/gpt2_full_finetune \
-  --data_dir data/wikitext2/wikitext-2-raw \
-  --pretrained_dir gpt2_small_lora_finetune/pretrained/gpt2 \
-  --output_path runs/gpt2_small_full_ft \
+export GPT2_SMALL_MODEL_DIR=$MFT_MODEL_ROOT/gpt2
+export WT2_DATA_DIR=$MFT_DATA_ROOT/wikitext2/wikitext-2-raw
+
+cmake -S gpt2_small_lora_finetune -B gpt2_small_lora_finetune/build
+cmake --build gpt2_small_lora_finetune/build --target train_full -j
+gpt2_small_lora_finetune/build/train_full \
+  --data_dir "$WT2_DATA_DIR" \
+  --pretrained_dir "$GPT2_SMALL_MODEL_DIR" \
+  --output_path runs/gpt2_small_full_ft.safetensors \
   --epochs 1 --batch_size 4 --grad_accum_steps 2 --seq_len 128 \
   --lr 1e-4 --warmup_steps 100
 ```
 
-### 3. Enable Memory Optimization
+## Model and Dataset Assets
 
-Add parameter sharding to reduce peak memory usage:
+The industrial package boundary is:
+
+- `operator/` provides the reusable C++ training core.
+- model app directories provide example CLIs for GPT-2, Gemma, and Qwen.
+- pretrained weights, datasets, run logs, and generated adapters are runtime
+  assets and are not part of the source distribution.
+
+Resolution order for maintained scripts is:
+
+1. explicit per-model/data environment variables, for example
+   `QWEN_MODEL_DIR` or `QWEN_DATA_DIR`;
+2. shared roots `MFT_MODEL_ROOT` and `MFT_DATA_ROOT`;
+3. the repo-local fallback directories such as
+   `qwen_lora_finetune/pretrained/` and `data/wikitext2/wikitext-2-raw/`.
+
+The fallback directories are useful for local research, but they are ignored by
+Git and should not be used as a release mechanism. For a new machine or CI
+worker, prefer explicit asset roots and validate them with:
+
 ```bash
-./build/gpt2_lora_finetune \
-  --data_dir data/wikitext2/wikitext-2-raw \
-  --pretrained_dir gpt2_lora_finetune/pretrained/gpt2 \
-  --lora_out runs/gpt2_lora_shard.safetensors \
-  --shard_enable \
-  --shard_dir /tmp/gft_param_shard \
-  --shard_budget_mb 512 \
-  --shard_fp16_disk 1 \
-  --epochs 1 --batch_size 4 --seq_len 128
+bash scripts/check_local_assets.sh
 ```
 
-### 4. Enable Energy-Aware Scheduling
-
-Adapt computation to battery and temperature constraints:
-```bash
-./build/gpt2_lora_finetune \
-  --data_dir data/wikitext2/wikitext-2-raw \
-  --pretrained_dir gpt2_lora_finetune/pretrained/gpt2 \
-  --lora_out runs/gpt2_lora_energy.safetensors \
-  --pm_interval 10 \
-  --pm_batt_thresh 20 --pm_fb_high 2.0 --pm_fb_low 0.5 \
-  --pm_temp_thresh 42 --pm_ft_high 2.0 --pm_ft_low 0.5 \
-  --epochs 1 --batch_size 4 --seq_len 128
-```
+Detailed layout and download examples are documented in
+[docs/MODEL_ASSETS.md](docs/MODEL_ASSETS.md).
 
 ---
 
@@ -317,36 +364,20 @@ Fast and safe tensor serialization:
 
 ---
 
-## Memory Optimization
+## Runtime Memory Controls
 
-### Parameter Sharding
+MobileFineTuner keeps the stable library focused on transparent C++ training
+semantics. The default memory controls are explicit and easy to audit:
 
-Inspired by ZeRO (Zero Redundancy Optimizer), MobileFineTuner implements parameter offloading to overcome mobile memory constraints:
-
-**How It Works:**
-1. All model parameters are registered with the `ParameterSharder`
-2. A resident memory budget (e.g., 512 MB) is enforced
-3. Parameters are loaded on-demand via `require()` calls during forward/backward
-4. LRU eviction policy offloads inactive parameters to disk
-5. Optional FP16 quantization reduces disk storage by 50%
-
-**Configuration:**
-```bash
---shard_enable              # Enable parameter sharding
---shard_dir /tmp/shard      # Disk offload directory
---shard_budget_mb 512       # Resident RAM budget (MB)
---shard_fp16_disk 1         # Enable FP16 disk quantization
-```
-
-**Memory Savings:**
-- GPT-2 Small: ~60% reduction (2.4 GB → 1.0 GB)
-- GPT-2 Medium: ~55% reduction (3.8 GB → 1.7 GB)
-- Gemma 270M: ~40% reduction (4.2 GB → 2.5 GB)
-
-**Trade-offs:**
-- Adds disk I/O overhead (~5-10% runtime increase)
-- Most effective when parameter memory dominates activation memory
-- Minimal overhead with SSD storage
+- model weights and datasets are loaded from runtime asset paths rather than
+  bundled into the library;
+- SafeTensors loading supports HuggingFace single-file and sharded checkpoints;
+- the training CLIs expose batch size, sequence length, step count, learning
+  rate, and gradient accumulation as runtime knobs;
+- the core tensor runtime can use the step arena allocator for selected
+  workloads through `-DUSE_ARENA_ALLOCATOR=ON`;
+- Android helper scripts can sample RSS and process telemetry during native
+  training runs.
 
 ### Gradient Accumulation
 
@@ -361,56 +392,18 @@ Result: Forward/backward runs on `batch_size / grad_accum_steps = 2` samples at 
 
 ---
 
-## Energy-Aware Training
-
-MobileFineTuner includes a power monitor (`opt_ops/energy/power_monitor`) that adapts computation intensity to battery and temperature constraints, extending battery life during sustained training. The monitor uses frequency-based throttling (Hz) which internally converts to sleep duration (ms) between training steps.
-
-### Configuration
-
-**Battery-Based Throttling:**
-```bash
---pm_interval 10            # Check battery every 10 steps
---pm_batt_thresh 20.0       # Throttle below 20% battery (default threshold)
---pm_fb_high 2.0            # Frequency high: 2 Hz (500ms sleep) when battery < threshold
---pm_fb_low 0.5             # Frequency low: 0.5 Hz (2000ms sleep) when battery ≥ threshold
-```
-
-**Temperature-Based Throttling:**
-```bash
---pm_temp_thresh 42.0       # Throttle above 42°C (default threshold)
---pm_ft_high 2.0            # Frequency high: 2 Hz when temp > threshold
---pm_ft_low 0.5             # Frequency low: 0.5 Hz when temp ≤ threshold
-```
-
-**Manual Schedule Override:**
-```bash
---pm_schedule "0-99:300,100-199:200,200-:100"
-# Steps 0-99: 300ms sleep per step
-# Steps 100-199: 200ms sleep per step
-# Steps 200+: 100ms sleep per step
-```
-
-### Impact on Training
-
-- **Energy Savings**: Adjustable throttling based on real-time battery/temperature telemetry
-- **Thermal Management**: Prevents device overheating during extended training sessions
-- **Flexible Control**: Supports manual telemetry simulation and deterministic schedule override
-- **Minimal Accuracy Loss**: Training time increases with sleep duration, but final model quality is preserved
-
-**Note:** Frequency parameters (`pm_fb_high`, `pm_ft_high`) are specified in Hz and internally converted to sleep milliseconds. For example, 2.0 Hz = 500ms sleep, 0.5 Hz = 2000ms sleep.
-
----
-
 ## Evaluation
 
 ### Perplexity (WikiText-2)
 
 Measure language modeling quality:
 ```bash
-./build/eval_ppl \
-  --data_root data/wikitext2/wikitext-2-raw \
-  --pretrained_dir gpt2_lora_finetune/pretrained/gpt2 \
-  --lora_path runs/gpt2_lora.safetensors \
+cmake -S gpt2_small_lora_finetune -B gpt2_small_lora_finetune/build
+cmake --build gpt2_small_lora_finetune/build --target eval_ppl -j
+gpt2_small_lora_finetune/build/eval_ppl \
+  --data_root "$MFT_DATA_ROOT/wikitext2/wikitext-2-raw" \
+  --pretrained_dir "$MFT_MODEL_ROOT/gpt2" \
+  --lora_path gpt2_small_lora_finetune/outputs/lora_final.safetensors \
   --lora_merge 1
 ```
 
@@ -422,77 +415,53 @@ Measure language modeling quality:
 
 Multi-task language understanding:
 ```bash
-./build/eval_mmlu \
-  --mmlu_root data/mmlu/data \
+(
+  cd gpt2_small_lora_finetune &&
+  ./run_eval.sh
+)
+(
+  cd gpt2_medium_lora_finetune &&
+  ./run_eval.sh
+)
+(
+  cd gemma_3_270m_lora_finetune &&
+  ./run_eval.sh
+)
+(
+  cd gemma_3_1b_pt_lora_finetune &&
+  ./run_eval.sh
+)
+
+# Direct GPT-2 eval binary invocation
+gpt2_small_lora_finetune/build/eval_mmlu \
+  --mmlu_root "$MFT_DATA_ROOT/mmlu/data" \
   --split dev \
-  --pretrained_dir gpt2_lora_finetune/pretrained/gpt2 \
-  --lora_path runs/gpt2_lora.safetensors \
+  --pretrained_dir "$MFT_MODEL_ROOT/gpt2" \
+  --lora_path gpt2_small_lora_finetune/outputs/lora_final.safetensors \
   --lora_merge 1 \
   --fewshot 0
 ```
 
 ---
 
-## PyTorch Alignment
-
-For numerical validation and debugging, MobileFineTuner includes PyTorch reference implementations in `pytorch_alignment/`:
-
-```bash
-# GPT-2 LoRA (PyTorch baseline)
-python pytorch_alignment/gpt2_lora_finetune.py \
-  --data_dir data/wikitext2/wikitext-2-raw \
-  --pretrained_dir gpt2_lora_finetune/pretrained/gpt2 \
-  --lora_out pytorch_runs/gpt2_lora \
-  --epochs 1 --batch_size 8 --seq_len 128
-
-# Gemma LoRA (PyTorch baseline)
-python pytorch_alignment/gemma_lora_finetune.py \
-  --model_dir gemma-3-270m \
-  --data_dir data/wikitext2/wikitext-2-raw \
-  --output_dir pytorch_runs/gemma_lora \
-  --epochs 1 --batch 4 --seq_len 256
-```
-
-**Use Cases:**
-- Verify loss curves match C++ implementation
-- Compare final adapter weights for numerical parity
-- Debug gradient flow and optimizer behavior
-
----
-
 ## Benchmarks
 
-Performance benchmarks on commodity mobile devices:
+Performance depends on device hardware, BLAS availability, model size, sequence
+length, batch size, and thermal state. The repository keeps benchmark
+collection scripts, not generated result files, in the release tree.
 
-### Memory Usage (Peak RSS)
+Recommended benchmark protocol:
 
-| Model | Baseline | + Sharding (512MB) | Reduction |
-|-------|----------|-------------------|-----------|
-| GPT-2 Small | 2.4 GB | 1.0 GB | 58% |
-| GPT-2 Medium | 3.8 GB | 1.7 GB | 55% |
-| Gemma 270M | 4.2 GB | 2.5 GB | 40% |
-| Gemma 1B | 8.5 GB | 4.8 GB | 44% |
+```bash
+bash scripts/run_training_smoke.sh
+bash scripts/run_training_real_assets.sh
+bash scripts/android/run_qwen_qnli_native_phone.sh
+```
 
-### Training Speed
-
-Training speed depends on device hardware, BLAS acceleration, and model size. Representative examples:
-
-| Model | Configuration | Approximate Time/Epoch |
-|-------|--------------|------------------------|
-| GPT-2 Small | batch=4, seq_len=128, BLAS enabled | 4-6 hours on modern mobile SoC |
-| GPT-2 Medium | batch=4, seq_len=128, BLAS enabled | 10-14 hours on modern mobile SoC |
-| Gemma 270M | batch=4, seq_len=256, BLAS enabled | 8-12 hours on modern mobile SoC |
-
-*Times vary significantly based on device specs, thermal throttling, and memory optimization settings*
-
-### Energy Efficiency
-
-| Configuration | Training Time | Energy Impact |
-|---------------|--------------|---------------|
-| No throttling | Baseline | High power draw, thermal throttling likely |
-| Energy-aware throttling | 1.5-2× baseline | Reduced power, extended battery life |
-
-*Note: Actual power savings depend on device hardware, battery level, and throttling aggressiveness*
+For Android runs, pair the native training command with
+`scripts/android/adb_resource_monitor.sh` to collect RSS and system telemetry.
+Store generated logs, adapters, plots, and spreadsheets under `runs/` or an
+external artifact directory; these paths are intentionally ignored by Git.
 
 ---
 
@@ -500,17 +469,15 @@ Training speed depends on device hardware, BLAS acceleration, and model size. Re
 
 ```
 MobileFineTuner/
-├── operators/                          # Core C++ framework
+├── operator/                           # Core C++ framework
 │   ├── finetune_ops/
 │   │   ├── core/                       # Tensor, autograd, memory manager
 │   │   ├── graph/                      # GPT-2, Gemma, Qwen graphs
 │   │   ├── nn/                         # Layers (Linear, LoRA, embeddings, norms)
 │   │   ├── optim/                      # Optimizers and trainers
 │   │   └── data/                       # WikiText-2, MMLU dataset loaders/tokenizers
-│   ├── opt_ops/
-│   │   ├── energy/                     # Power monitor
-│   │   └── sharding/                   # Parameter sharder
-│   ├── MEMORY_OPTIMIZATION_GUIDE.md
+│   ├── include/mobile_finetuner/       # Stable public umbrella header
+│   ├── cmake/                          # CMake package config templates
 │   └── CMakeLists.txt
 ├── gpt2_small_lora_finetune/           # GPT-2 Small LoRA + full FT (WikiText-2, MMLU)
 │   ├── src/{main.cpp, main_full.cpp, eval_ppl.cpp, eval_mmlu.cpp}
@@ -532,18 +499,14 @@ MobileFineTuner/
 │   ├── src/{wikitext_main.cpp, mmlu_main.cpp}
 │   ├── run_{wikitext,mmlu}.sh
 │   └── CMakeLists.txt
-├── pytorch_alignment/                  # PyTorch reference (numerical parity)
-│   ├── gpt2_{lora,full}_finetune.py
-│   ├── gemma_lora_finetune.py
-│   ├── qwen_lora_finetune.py
-│   └── README.md
 ├── scripts/                            # Automation and orchestration
-│   ├── benchmark/                      # Sharding/energy benchmarks
-│   └── Finetune/                       # Batch runners (C++ + PyTorch, incl. Qwen)
-├── data/                               # Expected data root
-│   ├── wikitext2/                      # raw and pretokenized
-│   └── mmlu/                           # CSV and JSONL
-├── runs/                               # Training outputs (LoRA, JSONL)
+│   ├── android/                        # Native Android build/run helpers
+│   ├── lib/                            # Shared shell helpers
+│   ├── run_training_smoke.sh
+│   └── run_training_real_assets.sh
+├── data/                               # Optional local dataset root, ignored by Git
+├── runs/                               # Optional local output root, ignored by Git
+├── Rubbish/                            # Archived experiments and generated artifacts
 └── README.md
 ```
 

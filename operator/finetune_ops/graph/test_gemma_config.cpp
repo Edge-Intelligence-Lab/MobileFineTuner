@@ -31,11 +31,11 @@ int main(int argc, char** argv) {
     std::cout << "\n[Test] GemmaKeyMapper::generate_gemma_mapping\n";
     auto mapping = GemmaKeyMapper::generate_gemma_mapping(cfg.num_hidden_layers);
 
-    size_t expected_per_layer = 13;  // 4 norms + 4 attn proj + 2 attn norms + 3 mlp
-    size_t expected_total = 3 + cfg.num_hidden_layers * expected_per_layer;  // top embed/norm/lm_head
+    [[maybe_unused]] size_t expected_per_layer = 13;  // 4 norms + 4 attn proj + 2 attn norms + 3 mlp
+    [[maybe_unused]] size_t expected_total = 3 + cfg.num_hidden_layers * expected_per_layer;  // top embed/norm/lm_head
     assert(mapping.size() == expected_total);
 
-    auto it = mapping.find("layers.0.self_attn.q_proj.weight");
+    [[maybe_unused]] auto it = mapping.find("layers.0.self_attn.q_proj.weight");
     assert(it != mapping.end());
     assert(it->second == "model.layers.0.self_attn.q_proj.weight");
 
@@ -43,4 +43,3 @@ int main(int argc, char** argv) {
     std::cout << "\nAll Gemma config/mapping tests passed ✅\n";
     return 0;
 }
-

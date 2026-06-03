@@ -335,8 +335,8 @@ int main(int argc, char** argv) {
             model.set_debug_retain_grads(false);
         }
 
-        SafeTensorsReader reader(cli.model_dir + "/model.safetensors");
-        reader.parse_header();
+        SafeTensorsModelReader reader(cli.model_dir);
+        reader.parse_headers();
         auto mapping = GemmaKeyMapper::generate_gemma_mapping(cfg.num_hidden_layers);
         SafeTensorsLoadOptions load_opts;
         load_opts.verbose = false;

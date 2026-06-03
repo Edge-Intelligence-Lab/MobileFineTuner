@@ -1,255 +1,113 @@
 # Scripts Directory
 
-Organized collection of utility scripts for training, benchmarking, and debugging the mobile deep learning framework.
+This directory keeps the maintained helper scripts that match the current
+repository layout and entrypoints. Historical benchmark and experiment scripts
+are archived under `Rubbish/`; the scripts documented here are the stable
+interfaces expected by CI and release checks.
 
 ## Directory Structure
 
-```
+```text
 scripts/
-├── benchmark/                    # Performance evaluation and benchmarking
-├── Finetune/                     # Training and alignment scripts
+├── asset_paths.py
+├── check_local_assets.sh
+├── check_release_tree.sh
+├── android/
+│   ├── adb_resource_monitor.sh
+│   ├── android_env.sh
+│   ├── build_qwen_android.sh
+│   ├── proc_mem_monitor.cpp
+│   ├── run_qwen_qnli_native_phone.sh
+│   └── stage_qwen_qnli_phone_assets.sh
+├── lib/
+│   └── asset_paths.sh
+├── plot_loss_curve.py
 ├── pretokenize_wikitext2_gemma.py
-├── plot_train200_results.py
-├── train_gemma3_lora_torch.py
-└── (Finetune/) run_qwen_lora_pt.sh
+├── run_training_real_assets.sh
+└── run_training_smoke.sh
 ```
 
----
+## Maintained Scripts
 
-## Benchmark Scripts
+### `check_local_assets.sh`
 
-Located in `benchmark/` directory.
+Prints the actual model/data asset directories that the repo will use on the current machine.
 
-### Parameter Sharding Tests
-
-#### `test_all_models_sharding.sh`
-Comprehensive sharding test across four models: GPT-2 Small, GPT-2 Medium, Gemma 270M, and Gemma 1B.
-
-**Usage:**
 ```bash
-bash scripts/benchmark/test_all_models_sharding.sh
+export MFT_MODEL_ROOT=/path/to/mft-models
+export MFT_DATA_ROOT=/path/to/mft-data
+bash scripts/check_local_assets.sh
 ```
 
-**Output:** `runs/shard_benchmark_YYYYMMDD_HHMMSS/results.txt`
+### `check_release_tree.sh`
 
-**Measured Metrics:**
-- Peak memory usage (baseline vs sharding)
-- Training time overhead
-- Disk usage for offloaded parameters
+Runs source-distribution checks for maintained entrypoints:
 
----
+- no personal absolute paths in release-facing files;
+- no large source files outside ignored asset/build areas;
+- package config templates and asset docs are present;
+- maintained shell scripts pass `bash -n`.
 
-#### `test_sharding_aggressive.sh`
-Demonstrates sharding optimization with aggressive (minimal) budget settings to maximize memory savings.
-
-**Usage:**
 ```bash
-bash scripts/benchmark/test_sharding_aggressive.sh
+bash scripts/check_release_tree.sh
 ```
 
-**Budget Configuration:**
-- GPT-2 Small: 200 MB (minimal viable budget)
-- GPT-2 Medium: 250 MB
-- Gemma 270M: 650 MB
-- Gemma 1B: 1200 MB
+### `run_training_smoke.sh`
 
-**Note:** Budget values are calibrated to fit the largest single parameter while forcing frequent swapping for maximum memory reduction.
+Runs the repo-level five-model synthetic smoke suite.
 
----
-
-#### `test_shard_optimization.sh`
-GPT-2 parameter sharding optimization test with multiple budget configurations (400MB, 200MB).
-
-**Usage:**
 ```bash
-bash scripts/benchmark/test_shard_optimization.sh
+bash scripts/run_training_smoke.sh
 ```
 
----
+Environment overrides:
+- `SMOKE_STEPS` to control the number of synthetic update steps
 
-#### `test_gemma_shard.sh`
-Isolated sharding test for Gemma 270M model.
+### `run_training_real_assets.sh`
 
-**Usage:**
+Runs a one-step real-asset validation for all five training entrypoints using auto-discovered local model/data directories.
+
 ```bash
-bash scripts/benchmark/test_gemma_shard.sh
+bash scripts/run_training_real_assets.sh
 ```
 
----
+Environment overrides:
+- `REAL_STEPS` to control the number of optimizer steps
+- `SEQ_LEN` to control the short sanity-check sequence length
+- `MFT_MODEL_ROOT` and `MFT_DATA_ROOT` to provide external assets
 
-### Energy-Aware Training Tests
+### Android Native MF Helpers
 
-#### `energy_benchmark.sh`
-Benchmark test for energy-aware training scheduler with battery and temperature monitoring.
+The maintained Android helpers build and run the native MF Qwen/QNLI path:
 
-**Usage:**
 ```bash
-bash scripts/benchmark/energy_benchmark.sh
+bash scripts/android/build_qwen_android.sh
+bash scripts/android/stage_qwen_qnli_phone_assets.sh
+bash scripts/android/run_qwen_qnli_native_phone.sh
 ```
 
-**Features:**
-- Dynamic sleep scheduling based on battery level
-- Temperature-aware throttling
-- Step-based scheduling support
+Environment overrides:
+- `ANDROID_NDK_ROOT`, `ANDROID_NDK_HOME`, `ANDROID_HOME`, or `ANDROID_SDK_ROOT`
+  to locate Android tooling
+- `ADB` to override the adb binary
+- `DEVICE_ROOT` and `DEVICE_OUT_DIR` to choose phone-side asset/output paths
 
----
+### `pretokenize_wikitext2_gemma.py`
 
-#### `test_energy_function.sh`
-Unit tests for energy scheduling functions.
+Offline-tokenizes WikiText-2 for Gemma-family experiments.
 
-**Usage:**
-```bash
-bash scripts/benchmark/test_energy_function.sh
-```
-
----
-
-## Finetune Scripts
-
-Located in `Finetune/` directory. These scripts handle training runs, alignment verification, and performance measurement.
-
-### Training Scripts
-
-#### `run_gemma_1b_lora.sh`
-Full training run for Gemma 1B with LoRA.
-
-#### `run_gemma_1b_short.sh`
-Short training run for quick testing.
-
-#### `run_gpt2_medium_lora.sh`
-GPT-2 Medium LoRA training.
-
-#### `run_qwen_lora_pt.sh`
-PyTorch Qwen2.5-0.5B LoRA training (WikiText-2 by default; supports JSONL MMLU if paths are provided via `--jsonl_*` in the script call).
-
-#### `run_gemma_270m_grad_accum_test.sh` / `run_gemma_270m_grad_accum_test_v2.sh`
-Gradient accumulation tests for Gemma 270M.
-
----
-
-### Alignment and Verification
-
-#### `run_all_alignment.sh`
-Run C++ (GPT-2, Gemma) plus PyTorch (GPT-2, Gemma, Qwen) alignment tests.
-
-#### `run_sequential_alignment.sh`
-Sequential alignment verification for debugging.
-
-#### `run_pytorch_alignment.sh`
-PyTorch numerical alignment baseline (runs GPT-2, Gemma, and Qwen in parallel; override `MODEL_*`/`DATA_DIR`/`OUT_BASE` via env vars).
-
-#### `run_pytorch_after_cpp.sh`
-PyTorch verification after C++ implementation changes.
-
----
-
-### Utilities
-
-#### `measure_rss.sh`
-Measure RSS (Resident Set Size) memory usage during training.
-
-**Usage:**
-```bash
-bash scripts/Finetune/measure_rss.sh
-```
-
-#### `plot_loss_curve.py`
-Plot training loss curves from log files.
-
-**Usage:**
-```bash
-python3 scripts/Finetune/plot_loss_curve.py
-```
-
----
-
-## Root-Level Utility Scripts
-
-### Data Processing
-
-#### `pretokenize_wikitext2_gemma.py`
-Preprocess WikiText-2 dataset for Gemma tokenizer.
-
-**Usage:**
 ```bash
 python3 scripts/pretokenize_wikitext2_gemma.py
 ```
 
-**Output:**
+Outputs:
 - `data/wikitext2/pretokenized_gemma/wt2_gemma_tokens.bin`
 - `data/wikitext2/pretokenized_gemma/meta.json`
 
----
+### `plot_loss_curve.py`
 
-### Visualization
-
-#### `plot_train200_results.py`
-Generate publication-quality plots and LaTeX tables from training results.
-
-**Usage:**
-```bash
-python3 scripts/plot_train200_results.py
-```
-
-**Output:**
-- PDF/PNG plots
-- LaTeX tables
-- CSV data files
-
-**Location:** `results/train200/`
-
----
-
-### PyTorch Baseline Training
-
-#### `train_gemma3_lora_torch.py`
-Reference implementation using PyTorch + PEFT for numerical alignment.
-
-**Usage:**
-```bash
-python3 scripts/train_gemma3_lora_torch.py \
-    --model_name_or_path gemma-3-270m \
-    --output_dir ./pytorch_baseline \
-    --max_steps 100
-```
-
-**Purpose:** 
-- Provide ground truth for gradient/loss validation
-- Benchmark comparison with C++ implementation
-
----
-
-## Quick Start Guide
-
-### 1. Before Running Any Script
-
-Ensure the latest build is ready:
+Plots a loss curve from a training log.
 
 ```bash
-cd operators/build_shard_benchmark
-cmake .. -DUSE_BLAS=ON -DCMAKE_BUILD_TYPE=Release
-make -j8
+python3 scripts/plot_loss_curve.py path/to/train.log path/to/loss.png
 ```
-
-### 2. Run Sharding Benchmark
-
-```bash
-bash scripts/benchmark/test_sharding_aggressive.sh
-```
-
-Expected runtime: ~15-20 minutes for all four models.
-
-### 3. View Results
-
-```bash
-cat runs/shard_aggressive_*/results.txt
-```
-
-### 4. Clean Up Old Test Runs
-
-```bash
-rm -rf runs/shard_benchmark_*
-rm -rf runs/shard_aggressive_*
-```
-
-

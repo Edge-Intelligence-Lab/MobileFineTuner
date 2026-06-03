@@ -6,6 +6,7 @@
 #include "trainer.h"
 #include "../data/wikitext2_dataset.h"
 #include "../core/lm_loss.h"
+#include "../core/ops.h"
 #include "../core/logger.h"
 #include "../core/performance_monitor.h"
 #include "../core/memory_manager.h"
@@ -37,30 +38,37 @@ LoRATrainer::LoRATrainer(GPT2Model& model,
     std::cout << "[Trainer] Initialized with:" << std::endl;
     std::cout << "  LR: " << config_.learning_rate << std::endl;
     std::cout << "  Epochs: " << config_.num_epochs << std::endl;
+    std::cout << "  Micro batch size: " << config_.micro_batch_size << std::endl;
     std::cout << "  Grad accum steps: " << config_.gradient_accumulation_steps << std::endl;
     std::cout << "  Max grad norm: " << config_.max_grad_norm << std::endl;
 }
 
 float LoRATrainer::get_lr(int step) {
-    // Compute total steps
-    int64_t total_steps = train_data_.num_sequences() / config_.gradient_accumulation_steps * config_.num_epochs;
+    int64_t micro_batches_per_epoch =
+        (train_data_.num_sequences() + config_.micro_batch_size - 1) / config_.micro_batch_size;
+    int64_t total_steps =
+        (micro_batches_per_epoch * config_.num_epochs + config_.gradient_accumulation_steps - 1) /
+        config_.gradient_accumulation_steps;
+    total_steps = std::max<int64_t>(1, total_steps);
     int warmup_steps = static_cast<int>(total_steps * config_.warmup_ratio);
     
-    if (step < warmup_steps) {
+    if (warmup_steps > 0 && step <= warmup_steps) {
         // Linear warmup
         return config_.learning_rate * (static_cast<float>(step) / warmup_steps);
-    } else {
-        // Linear decay or cosine
-        if (config_.lr_scheduler == "linear") {
-            float progress = static_cast<float>(step - warmup_steps) / (total_steps - warmup_steps);
-            return config_.learning_rate * (1.0f - progress);
-        } else if (config_.lr_scheduler == "cosine") {
-            float progress = static_cast<float>(step - warmup_steps) / (total_steps - warmup_steps);
-            return config_.learning_rate * 0.5f * (1.0f + std::cos(3.14159265f * progress));
-        } else {
-            return config_.learning_rate;
-        }
     }
+
+    float progress =
+        static_cast<float>(step - warmup_steps) / std::max<int64_t>(1, total_steps - warmup_steps);
+    progress = std::clamp(progress, 0.0f, 1.0f);
+
+    // Linear decay or cosine
+    if (config_.lr_scheduler == "linear") {
+        return config_.learning_rate * (1.0f - progress);
+    } else if (config_.lr_scheduler == "cosine") {
+        return config_.learning_rate * 0.5f * (1.0f + std::cos(3.14159265f * progress));
+    }
+
+    return config_.learning_rate;
 }
 
 void LoRATrainer::clip_gradients() {
@@ -100,8 +108,15 @@ float LoRATrainer::train_step(const Batch& batch) {
     float loss_val = loss->data<float>()[0];
     
     // 3. Backward
-    loss->backward();
-    
+    auto scaled_loss = mul(loss, 1.0f / static_cast<float>(config_.gradient_accumulation_steps));
+    scaled_loss->backward();
+    accum_counter_++;
+    accum_loss_ += loss_val;
+
+    if (accum_counter_ < config_.gradient_accumulation_steps) {
+        return -1.0f;
+    }
+
     // 4. Clip gradients
     clip_gradients();
     
@@ -111,6 +126,7 @@ float LoRATrainer::train_step(const Batch& batch) {
     for (const auto& param : lora_params) {
         grads.push_back(param->grad());
     }
+    optimizer_->set_learning_rate(get_lr(global_step_ + 1));
     optimizer_->step(lora_params, grads);
     
     // 6. Zero grad
@@ -119,11 +135,14 @@ float LoRATrainer::train_step(const Batch& batch) {
     }
     
     global_step_++;
+    accum_counter_ = 0;
+    float avg_loss = accum_loss_ / static_cast<float>(config_.gradient_accumulation_steps);
+    accum_loss_ = 0.0f;
     
     // 7. Force memory cleanup each step to avoid long-term RSS growth
     MemoryManager::instance().force_cleanup();
     
-    return loss_val;
+    return avg_loss;
 }
 
 float LoRATrainer::evaluate() {
@@ -135,7 +154,7 @@ float LoRATrainer::evaluate() {
     
     // Disable dropout during evaluation (TODO: add mode switch)
     while (true) {
-        auto batch = eval_data_.next_batch(config_.gradient_accumulation_steps, false);
+        auto batch = eval_data_.next_batch(config_.micro_batch_size, false);
         if (!batch.input_ids) break;  // no more data
         
         // Forward only
@@ -180,10 +199,13 @@ void LoRATrainer::train() {
         int num_batches = 0;
         
         while (true) {
-            auto batch = train_data_.next_batch(config_.gradient_accumulation_steps, false);
+            auto batch = train_data_.next_batch(config_.micro_batch_size, false);
             if (!batch.input_ids) break;  // end of epoch
             
             float loss = train_step(batch);
+            if (loss < 0.0f) {
+                continue;
+            }
             epoch_loss += loss;
             num_batches++;
             
@@ -203,9 +225,6 @@ void LoRATrainer::train() {
                 train_data_.reset_cursor();  // Reset training data iterator
             }
             
-            // Update learning rate
-            float new_lr = get_lr(global_step_);
-            optimizer_->set_learning_rate(new_lr);
         }
         
         float mean_loss = (num_batches > 0) ? (epoch_loss / num_batches) : 0.0f;
@@ -230,9 +249,7 @@ void LoRATrainer::train() {
 
 void LoRATrainer::save_lora(const std::string& path) {
     std::cout << "[Trainer] Saving LoRA weights to: " << path << std::endl;
-    // TODO: implement safetensors save
-    // LoraSaver::save(lora_, path);
+    lora_.save_lora_safetensors(path);
 }
 
 }  // namespace ops
-

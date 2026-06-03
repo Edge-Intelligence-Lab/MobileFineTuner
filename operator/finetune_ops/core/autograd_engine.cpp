@@ -125,8 +125,10 @@ void Engine::accumulate_grad(const TensorPtr& tensor, const TensorPtr& grad) {
     auto it = pending_grads_.find(raw_ptr);
     
     if (it == pending_grads_.end()) {
-        // First gradient for this tensor
-        pending_grads_[raw_ptr] = grad->clone();
+        // First gradient for this tensor. Take shared ownership directly; a
+        // clone here doubles large intermediate gradients without changing
+        // semantics. Later contributors are accumulated in place below.
+        pending_grads_[raw_ptr] = grad;
     } else {
         // Accumulate with existing gradient
         auto& existing_grad = it->second;
@@ -207,9 +209,14 @@ void Engine::run_backward(const std::vector<TensorPtr>& outputs,
                     accumulate_grad(edge->input_node->tensor, input_grads[idx]);
                 }
             }
-        } else {
-            // Legacy path: assume legacy grad_fn_ already accumulated into each input
-            continue;
+        }
+
+        // This node's full downstream gradient has now been consumed. Keep only
+        // gradients the user explicitly asked to retain; leaf gradients remain
+        // in pending_grads_ because leaves have no backward function and hit the
+        // `continue` above.
+        if (!node->tensor->retains_grad()) {
+            pending_grads_.erase(raw_ptr);
         }
     }
     
@@ -240,7 +247,19 @@ void Engine::run_backward(const std::vector<TensorPtr>& outputs,
             should_write = tensor_shared->is_leaf() || tensor_shared->retains_grad();
             #endif
             if (should_write) {
-                tensor_shared->set_grad(grad);
+                if (tensor_shared->grad()) {
+                    TensorPtr existing = tensor_shared->grad();
+                    if (existing->shape() != grad->shape()) {
+                        throw std::runtime_error("Gradient shape mismatch during leaf accumulation");
+                    }
+                    const float* src = grad->data<float>();
+                    float* dst = existing->data<float>();
+                    for (int64_t i = 0; i < existing->numel(); ++i) {
+                        dst[i] += src[i];
+                    }
+                } else {
+                    tensor_shared->set_grad(grad);
+                }
                 #ifdef AUTOGRAD_DEBUG
                 // Debug only
                 #endif

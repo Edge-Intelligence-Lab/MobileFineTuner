@@ -7,13 +7,137 @@
 #include "../core/ops.h"
 #include "../core/autograd_engine.h"
 #include "../core/backward_functions.h"
-#include <stdexcept>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
 
 namespace ops {
 
 namespace {
+float read_tensor_float(const TensorPtr& t, int64_t idx) {
+    switch (t->dtype()) {
+        case kFloat32:
+            return t->data<float>()[idx];
+        case kFloat16:
+            return fp16_bits_to_float32(t->data<uint16_t>()[idx]);
+        case kBFloat16:
+            return bf16_bits_to_float32(t->data<uint16_t>()[idx]);
+        default:
+            throw std::runtime_error("LoRALinear: expected floating-point tensor storage");
+    }
+}
+
+void write_tensor_float(const TensorPtr& t, int64_t idx, float value) {
+    switch (t->dtype()) {
+        case kFloat32:
+            t->data<float>()[idx] = value;
+            return;
+        case kFloat16:
+            t->data<uint16_t>()[idx] = float32_to_fp16_bits(value);
+            return;
+        case kBFloat16:
+            t->data<uint16_t>()[idx] = float32_to_bf16_bits(value);
+            return;
+        default:
+            throw std::runtime_error("LoRALinear: expected floating-point tensor storage");
+    }
+}
+
+struct EffectiveLoraShape {
+    int64_t in_dim = 0;
+    int64_t rank = 0;
+    int64_t out_dim = 0;
+    bool a_transposed = false;
+    bool b_transposed = false;
+};
+
+EffectiveLoraShape infer_effective_lora_shape(const TensorPtr& A,
+                                              const TensorPtr& B,
+                                              int64_t in_dim) {
+    if (!A || !B || A->ndim() != 2 || B->ndim() != 2) {
+        throw std::runtime_error("LoRALinear: LoRA A/B must be 2D tensors");
+    }
+
+    EffectiveLoraShape shape;
+    shape.in_dim = in_dim;
+    if (A->shape()[0] == in_dim) {
+        shape.rank = A->shape()[1];
+        shape.a_transposed = false;
+    } else if (A->shape()[1] == in_dim) {
+        shape.rank = A->shape()[0];
+        shape.a_transposed = true;
+    } else {
+        throw std::runtime_error("LoRALinear: LoRA A shape is incompatible with input dimension");
+    }
+
+    if (B->shape()[0] == shape.rank) {
+        shape.out_dim = B->shape()[1];
+        shape.b_transposed = false;
+    } else if (B->shape()[1] == shape.rank) {
+        shape.out_dim = B->shape()[0];
+        shape.b_transposed = true;
+    } else {
+        throw std::runtime_error("LoRALinear: LoRA B shape is incompatible with rank");
+    }
+
+    return shape;
+}
+
+float lora_a_at(const TensorPtr& A, const EffectiveLoraShape& shape, int64_t in_idx, int64_t r_idx) {
+    int64_t idx = shape.a_transposed
+        ? r_idx * shape.in_dim + in_idx
+        : in_idx * shape.rank + r_idx;
+    return read_tensor_float(A, idx);
+}
+
+float lora_b_at(const TensorPtr& B, const EffectiveLoraShape& shape, int64_t r_idx, int64_t out_idx) {
+    int64_t idx = shape.b_transposed
+        ? out_idx * shape.rank + r_idx
+        : r_idx * shape.out_dim + out_idx;
+    return read_tensor_float(B, idx);
+}
+
+size_t tensor_nbytes(const TensorPtr& t) {
+    return static_cast<size_t>(t->numel()) * DTypeUtils::size_of(t->dtype());
+}
+
+void apply_lora_delta_to_base(const TensorPtr& W, const LoRASlice& slice, float sign) {
+    if (!DTypeUtils::is_floating_point(W->dtype())) {
+        throw std::runtime_error("LoRALinear: merge requires floating-point base weights");
+    }
+    if (W->ndim() != 2) {
+        throw std::runtime_error("LoRALinear: merge requires a 2D base weight");
+    }
+
+    const int64_t in_dim = W->shape()[0];
+    const int64_t out_dim = W->shape()[1];
+    const auto view = infer_effective_lora_shape(slice.A, slice.B, in_dim);
+    const int64_t expected_cols = slice.cols > 0 ? slice.cols : view.out_dim;
+    if (expected_cols != view.out_dim) {
+        throw std::runtime_error("LoRALinear: LoRA slice cols do not match B output dimension");
+    }
+    if (slice.col0 < 0 || slice.col0 + view.out_dim > out_dim) {
+        throw std::runtime_error("LoRALinear: LoRA slice range exceeds base weight width");
+    }
+
+    for (int64_t i = 0; i < in_dim; ++i) {
+        for (int64_t o = 0; o < view.out_dim; ++o) {
+            double delta = 0.0;
+            for (int64_t r = 0; r < view.rank; ++r) {
+                delta += static_cast<double>(lora_a_at(slice.A, view, i, r)) *
+                         static_cast<double>(lora_b_at(slice.B, view, r, o));
+            }
+            const int64_t w_idx = i * out_dim + (slice.col0 + o);
+            const float updated = read_tensor_float(W, w_idx) +
+                                  sign * slice.scale * static_cast<float>(delta);
+            write_tensor_float(W, w_idx, updated);
+        }
+    }
+}
+
 // Hand-written LoRA branch backward: only handles x/A/B
 struct LoRADeltaBackward : public BackwardFunction {
     TensorPtr x_;
@@ -177,7 +301,11 @@ void LoRALinear::attach_lora(const TensorPtr& A, const TensorPtr& B,
         throw std::runtime_error("LoRALinear::attach_lora: A and B must be 2D");
     }
     
-    int64_t out_cols = (cols <= 0) ? B->shape()[1] : cols;
+    int64_t out_cols = cols;
+    if (out_cols <= 0) {
+        int64_t base_in_dim = W_->shape().empty() ? A->shape()[0] : W_->shape()[0];
+        out_cols = infer_effective_lora_shape(A, B, base_in_dim).out_dim;
+    }
     
     // LoRA parameters require gradients
     A->set_requires_grad(true);
@@ -187,8 +315,12 @@ void LoRALinear::attach_lora(const TensorPtr& A, const TensorPtr& B,
 }
 
 void LoRALinear::clear_lora() {
+    if (merged_) {
+        unmerge_from_base();
+    }
     slices_.clear();
     merged_ = false;
+    merge_backup_.clear();
 }
 
 std::vector<std::pair<std::string, TensorPtr>> LoRALinear::debug_params() const {
@@ -337,35 +469,15 @@ TensorPtr LoRALinear::forward(const TensorPtr& x) const {
 
 void LoRALinear::merge_to_base() {
     if (merged_ || slices_.empty()) return;
-    
-    // Compute ΔW for all LoRA slices and add to base
+
+    const size_t nbytes = tensor_nbytes(W_);
+    merge_backup_.resize(nbytes);
+    if (nbytes != 0) {
+        std::memcpy(merge_backup_.data(), W_->data_ptr(), nbytes);
+    }
+
     for (const auto& slice : slices_) {
-        // ΔW_slice = A @ B * scale  -> [in, out_slice]
-        auto delta_W = matmul(slice.A, slice.B);
-        delta_W = mul(delta_W, slice.scale);
-        
-        // Add in-place to W submatrix W[:, col0:col0+cols]
-        // Simplified: add to full W (assumes slice.col0=0 and cols cover full width)
-        // TODO: full implementation should use submatrix ops
-        float* W_data = W_->data<float>();
-        const float* delta_data = delta_W->data<float>();
-        
-        int64_t in_dim = W_->shape()[0];
-        int64_t out_dim = W_->shape()[1];
-        
-        // Validate: for non-split cases delta should match W shape
-        if (delta_W->shape()[0] == in_dim && delta_W->shape()[1] == slice.cols) {
-            // 加到指定列范围
-            for (int64_t i = 0; i < in_dim; ++i) {
-                for (int64_t j = 0; j < slice.cols; ++j) {
-                    int64_t W_idx = i * out_dim + (slice.col0 + j);
-                    int64_t delta_idx = i * slice.cols + j;
-                    W_data[W_idx] += delta_data[delta_idx];
-                }
-            }
-        } else {
-            throw std::runtime_error("LoRALinear::merge_to_base: shape mismatch");
-        }
+        apply_lora_delta_to_base(W_, slice, +1.0f);
     }
     
     merged_ = true;
@@ -373,27 +485,22 @@ void LoRALinear::merge_to_base() {
 
 void LoRALinear::unmerge_from_base() {
     if (!merged_ || slices_.empty()) return;
-    
-    // Subtract LoRA deltas from base
-    for (const auto& slice : slices_) {
-        auto delta_W = matmul(slice.A, slice.B);
-        delta_W = mul(delta_W, slice.scale);
-        
-        float* W_data = W_->data<float>();
-        const float* delta_data = delta_W->data<float>();
-        
-        int64_t in_dim = W_->shape()[0];
-        int64_t out_dim = W_->shape()[1];
-        
-        if (delta_W->shape()[0] == in_dim && delta_W->shape()[1] == slice.cols) {
-            for (int64_t i = 0; i < in_dim; ++i) {
-                for (int64_t j = 0; j < slice.cols; ++j) {
-                    int64_t W_idx = i * out_dim + (slice.col0 + j);
-                    int64_t delta_idx = i * slice.cols + j;
-                    W_data[W_idx] -= delta_data[delta_idx];
-                }
-            }
+
+    const size_t nbytes = tensor_nbytes(W_);
+    if (!merge_backup_.empty()) {
+        if (merge_backup_.size() != nbytes) {
+            throw std::runtime_error("LoRALinear::unmerge_from_base: merge backup size mismatch");
         }
+        if (nbytes != 0) {
+            std::memcpy(W_->data_ptr(), merge_backup_.data(), nbytes);
+        }
+        merge_backup_.clear();
+        merged_ = false;
+        return;
+    }
+
+    for (const auto& slice : slices_) {
+        apply_lora_delta_to_base(W_, slice, -1.0f);
     }
     
     merged_ = false;
