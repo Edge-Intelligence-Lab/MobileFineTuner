@@ -1,6 +1,6 @@
 # MobileFineTuner Android Visualizer
 
-A research-grade Android dashboard for monitoring and visualizing on-device LLM fine-tuning in real time. Designed as the companion app to the [MobileFineTuner](https://github.com/your-repo/MobileFineTuner) framework — a pure C++17 system that fine-tunes GPT-2, Gemma, and Qwen models directly on mobile hardware.
+A research-grade Android dashboard for monitoring and visualizing MobileFineTuner runs in real time. It is designed as the companion app to the [MobileFineTuner](https://github.com/your-repo/MobileFineTuner) C++17 core; the current release validates Android native execution with synthetic Qwen LoRA smoke tests, while full-weight model training requires externally supplied assets and device-specific validation.
 
 ---
 
