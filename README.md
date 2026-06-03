@@ -1,9 +1,9 @@
 # MobileFineTuner
 
-**A Unified End-to-End Framework for Fine-Tuning LLMs on Mobile Phones**
+**A C++ Framework for Mobile-Oriented LLM Fine-Tuning**
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-iOS%20%7C%20Android-green.svg)]()
+[![Platform](https://img.shields.io/badge/Platform-C%2B%2B%20Core%20%7C%20Android%20Native-green.svg)]()
 [![C++](https://img.shields.io/badge/C%2B%2B-17-orange.svg)]()
 
 <img width="2250" height="1370" alt="framework" src="https://github.com/user-attachments/assets/b4a6768c-d644-4ec8-8d3c-10d6ada04c3e" />
@@ -31,9 +31,16 @@ If you find this project useful, please consider citing our paper.
 
 ## Overview
 
-MobileFineTuner is an open-source framework that enables practical, privacy-preserving fine-tuning of Large Language Models (LLMs) directly on commodity mobile phones. By keeping sensitive user data on-device, MobileFineTuner addresses critical privacy concerns while unlocking vast amounts of valuable private-domain data for personalized model adaptation.
+MobileFineTuner is an open-source C++ framework for practical, privacy-preserving fine-tuning of Large Language Models (LLMs) on mobile-class devices. The current release candidate verifies the stable C++ core, package/export surface, local training entrypoints, and Android native synthetic smoke execution. Full-weight on-phone training requires externally supplied model weights and device-specific validation.
 
-Unlike simulation-based or desktop-bound approaches, MobileFineTuner runs natively on mobile hardware through a lean C++ implementation, eliminating Python runtime overhead and enabling both Full Fine-Tuning (Full-FT) and Parameter-Efficient Fine-Tuning (PEFT/LoRA) under tight resource constraints.
+Unlike simulation-based or desktop-bound approaches, MobileFineTuner is built around a lean native C++ implementation that eliminates Python runtime overhead in the training path and supports both Full Fine-Tuning (Full-FT) and Parameter-Efficient Fine-Tuning (PEFT/LoRA) under tight resource constraints.
+
+### Verified Scope
+
+- Stable C++ operator/autograd/LoRA core with unit tests and installable CMake package.
+- Five local training smoke entrypoints: GPT-2 small, GPT-2 medium, Gemma 270M, Gemma 1B-PT, and Qwen.
+- Android native build/run path validated with a synthetic Qwen LoRA smoke test, including loss/backward/update and 5 ms RSS sampling.
+- Full pretrained weights, benchmark datasets, adapters, run logs, and phone QA media are external runtime artifacts and are not bundled in the source release.
 
 ### Key Features
 

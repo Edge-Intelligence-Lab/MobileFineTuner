@@ -16,6 +16,7 @@ android-visualizer/.gradle/ export-ignore
 android-visualizer/app/build/ export-ignore
 *.safetensors export-ignore
 *.bin export-ignore
+operator/finetune_ops/graph/testdata/gemma_forward_golden.bin -export-ignore
 *.pt export-ignore
 *.pth export-ignore
 *.ckpt export-ignore
