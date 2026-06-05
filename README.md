@@ -1,6 +1,6 @@
 # MobileFineTuner
 
-**A C++ Framework for Mobile-Oriented LLM Fine-Tuning**
+**A C++ Framework for Mobile-Native LLM Fine-Tuning**
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-C%2B%2B%20Core%20%7C%20Android%20Native-green.svg)]()
