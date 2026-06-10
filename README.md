@@ -6,7 +6,7 @@
 [![Platform](https://img.shields.io/badge/Platform-C%2B%2B%20Core%20%7C%20Android%20Native-green.svg)]()
 [![C++](https://img.shields.io/badge/C%2B%2B-17-orange.svg)]()
 
-<img width="2250" height="1370" alt="framework" src="https://github.com/user-attachments/assets/b4a6768c-d644-4ec8-8d3c-10d6ada04c3e" />
+<img width="1512" height="922" alt="overview-git" src="https://github.com/user-attachments/assets/28cff6dc-9732-4b53-8410-39a591909f3b" />
 
 <img width="1992" height="1112" alt="image" src="https://github.com/user-attachments/assets/35cb5c4e-a3bb-4a21-aac2-d38d50899a17" />
 
