@@ -49,7 +49,7 @@ Unlike simulation-based or desktop-bound approaches, MobileFineTuner is built ar
 
 ### Key Features
 
-- **Efficiency**: Pure C++ implementation with modular operators, automatic differentiation, and full backpropagation鈥攏o Python runtime or external ML frameworks required
+- **Efficiency**: Pure C++ implementation with modular operators, automatic differentiation, and full backpropagation without Python runtime or external ML frameworks required
 - **Scalability**: Supports multiple mainstream decoder-only LLM architectures (GPT-2, Gemma, Qwen) with reusable graph, tokenizer, dataset, and LoRA components
 - **Usability**: Simple high-level APIs that abstract away system complexity, enabling rapid prototyping and practical deployment
 - **Privacy-Preserving**: All training data remains on-device, complying with GDPR and user privacy expectations
