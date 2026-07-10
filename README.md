@@ -80,7 +80,7 @@ Unlike simulation-based or desktop-bound approaches, MobileFineTuner is built ar
 ### Prerequisites
 
 - **Compiler**: C++17 or later
-- **Build System**: CMake 鈮?3.10
+- **Build System**: CMake ≥ 3.10
 - **Threading**: pthreads
 - **BLAS** (optional): Apple Accelerate, OpenBLAS, or Intel MKL for accelerated matrix operations
 
@@ -581,29 +581,29 @@ external artifact directory; these paths are intentionally ignored by Git.
 
 ```
 MobileFineTuner/
-鈹溾攢鈹€ operator/                           # Core C++ framework
-鈹?  鈹溾攢鈹€ finetune_ops/
-鈹?  鈹?  鈹溾攢鈹€ core/                       # Tensor, autograd, memory manager
-鈹?  鈹?  鈹溾攢鈹€ graph/                      # GPT-2, Gemma, Qwen graphs
-鈹?  鈹?  鈹溾攢鈹€ nn/                         # LoRA layers
-鈹?  鈹?  鈹溾攢鈹€ optim/                      # Optimizers and trainers
-鈹?  鈹?  鈹斺攢鈹€ data/                       # WikiText-2, MMLU dataset loaders/tokenizers
-鈹?  鈹溾攢鈹€ include/mobile_finetuner/       # Stable public umbrella header
-鈹?  鈹溾攢鈹€ cmake/                          # CMake package config templates
-鈹?  鈹斺攢鈹€ CMakeLists.txt
-鈹溾攢鈹€ examples/                           # Runnable model-specific applications
-鈹?  鈹溾攢鈹€ common/                         # Shared example-only evaluation helpers
-鈹?  鈹溾攢鈹€ gpt2_small_lora_finetune/       # GPT-2 Small LoRA + full FT
-鈹?  鈹溾攢鈹€ gpt2_medium_lora_finetune/      # GPT-2 Medium LoRA
-鈹?  鈹溾攢鈹€ gemma_3_270m_lora_finetune/     # Gemma 270M LoRA
-鈹?  鈹溾攢鈹€ gemma_3_1b_pt_lora_finetune/    # Gemma 1B-PT LoRA
-鈹?  鈹斺攢鈹€ qwen_lora_finetune/             # Qwen2.5-0.5B LoRA
-鈹溾攢鈹€ scripts/                            # Automation and orchestration
-鈹?  鈹溾攢鈹€ android/                        # Native Android build/run helpers
-鈹?  鈹溾攢鈹€ lib/                            # Shared shell helpers
-鈹?  鈹溾攢鈹€ run_training_smoke.sh
-鈹?  鈹斺攢鈹€ run_training_real_assets.sh
-鈹斺攢鈹€ README.md
+├── operator/                           # Core C++ framework
+│   ├── finetune_ops/
+│   │   ├── core/                       # Tensor, autograd, memory manager
+│   │   ├── graph/                      # GPT-2, Gemma, Qwen graphs
+│   │   ├── nn/                         # LoRA layers
+│   │   ├── optim/                      # Optimizers and trainers
+│   │   └── data/                       # WikiText-2, MMLU dataset loaders/tokenizers
+│   ├── include/mobile_finetuner/       # Stable public umbrella header
+│   ├── cmake/                          # CMake package config templates
+│   └── CMakeLists.txt
+├── examples/                           # Runnable model-specific applications
+│   ├── common/                         # Shared example-only evaluation helpers
+│   ├── gpt2_small_lora_finetune/       # GPT-2 Small LoRA + full FT
+│   ├── gpt2_medium_lora_finetune/      # GPT-2 Medium LoRA
+│   ├── gemma_3_270m_lora_finetune/     # Gemma 270M LoRA
+│   ├── gemma_3_1b_pt_lora_finetune/    # Gemma 1B-PT LoRA
+│   └── qwen_lora_finetune/             # Qwen2.5-0.5B LoRA
+├── scripts/                            # Automation and orchestration
+│   ├── android/                        # Native Android build/run helpers
+│   ├── lib/                            # Shared shell helpers
+│   ├── run_training_smoke.sh
+│   └── run_training_real_assets.sh
+└── README.md
 ```
 
 Local data, run-output, review, and archive directories may exist in developer
