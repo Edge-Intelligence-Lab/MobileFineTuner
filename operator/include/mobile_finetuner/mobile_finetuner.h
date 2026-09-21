@@ -33,3 +33,5 @@
 #include "finetune_ops/optim/gemma_trainer.h"
 #include "finetune_ops/optim/optimizer.h"
 #include "finetune_ops/optim/trainer.h"
+
+#include "finetune_ops/energy/power_monitor.h"

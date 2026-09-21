@@ -63,6 +63,16 @@ The current Auto APIs cover the shared causal-LM/LoRA training core. Specialized
 dataset loops, logging, checkpoint schedules, and model-specific diagnostics can
 still use the lower-level graph classes directly.
 
+## Opt-in Energy-Aware Throttling
+
+`ops::energy::PowerMonitor` is a model-independent scheduler exposed by the same
+umbrella header. It suggests idle milliseconds after completed optimizer updates
+using an explicit schedule or application-provided battery/temperature readings.
+It is off by default and does not read sensors, sleep, or change model parameters
+itself. See [ENERGY_SCHEDULER.md](ENERGY_SCHEDULER.md) for the API, Qwen example
+integration, timing semantics, and tests. Throttling is not evidence of reduced
+total energy; that requires measurements on the target device.
+
 ## Android SDK API
 
 Android applications can consume the AAR built from `android-visualizer/mft-sdk`.

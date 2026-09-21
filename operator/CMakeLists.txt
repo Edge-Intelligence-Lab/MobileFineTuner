@@ -95,6 +95,7 @@ include_directories(
 # =========================================================================
 
 set(FINETUNE_SOURCES
+    finetune_ops/energy/power_monitor.cpp
     # Core system files
     finetune_ops/core/tensor.cpp
     finetune_ops/core/ops.cpp
@@ -221,6 +222,11 @@ install(DIRECTORY
         PATTERN "*.hpp"
 )
 
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/energy
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/finetune_ops
+    FILES_MATCHING PATTERN "*.h"
+)
+
 install(DIRECTORY
     ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/core
     ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/data
@@ -300,6 +306,10 @@ install(FILES
 # ============================================================================
 if(BUILD_TESTS)
     enable_testing()
+
+    add_executable(test_power_monitor finetune_ops/energy/test_power_monitor.cpp)
+    target_link_libraries(test_power_monitor PRIVATE operators)
+    add_test(NAME PowerMonitor COMMAND test_power_monitor)
     
     # Autograd engine tests
     if(USE_NEW_AUTOGRAD_ENGINE)
