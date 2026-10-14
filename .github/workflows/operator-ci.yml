@@ -7,6 +7,7 @@ on:
       - "operator/**"
       - "examples/**"
       - "scripts/run_training_smoke.sh"
+      - "scripts/test_energy_scheduler.py"
       - "scripts/check_release_tree.sh"
       - "scripts/check_local_assets.sh"
       - "scripts/asset_paths.py"
@@ -21,6 +22,7 @@ on:
       - "operator/**"
       - "examples/**"
       - "scripts/run_training_smoke.sh"
+      - "scripts/test_energy_scheduler.py"
       - "scripts/check_release_tree.sh"
       - "scripts/check_local_assets.sh"
       - "scripts/asset_paths.py"
@@ -119,7 +121,7 @@ jobs:
           #include "finetune_ops/optim/optimizer.h"
           #include "finetune_ops/optim/trainer.h"
           #include "mobile_finetuner/mobile_finetuner.h"
-          int main() { return 0; }
+          int main() { ops::energy::PowerMonitor monitor; return monitor.suggest_sleep_ms(0); }
           EOF
           cmake -S /tmp/operators-consumer -B /tmp/operators-consumer/build -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/operator/install"
           cmake --build /tmp/operators-consumer/build -j4
@@ -138,7 +140,7 @@ jobs:
           EOF
           cat > /tmp/mft-consumer/main.cpp <<'EOF'
           #include "mobile_finetuner/mobile_finetuner.h"
-          int main() { return 0; }
+          int main() { ops::energy::PowerMonitor monitor; return monitor.suggest_sleep_ms(0); }
           EOF
           cmake -S /tmp/mft-consumer -B /tmp/mft-consumer/build -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/operator/install"
           cmake --build /tmp/mft-consumer/build -j4
@@ -155,3 +157,6 @@ jobs:
 
       - name: Five-model smoke
         run: bash scripts/run_training_smoke.sh
+
+      - name: Energy scheduler integration
+        run: python3 scripts/test_energy_scheduler.py --binary examples/qwen_lora_finetune/build/train_wikitext

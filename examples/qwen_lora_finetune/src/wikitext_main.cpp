@@ -6,6 +6,7 @@
 #include <chrono>
 #include <iomanip>
 #include <cstdint>
+#include <thread>
 
 #include "finetune_ops/core/tokenizer_bpe.h"
 #include "finetune_ops/core/lm_loss.h"
@@ -16,6 +17,7 @@
 #include "finetune_ops/graph/safetensors_loader.h"
 #include "finetune_ops/core/memory_manager.h"
 #include "finetune_ops/graph/qwen_model.h"
+#include "finetune_ops/energy/power_monitor.h"
 
 using namespace ops;
 
@@ -45,6 +47,7 @@ struct Args {
     std::string dump_first_batch_json;
     bool dump_only = false;
     std::string base_weight_storage = "auto"; // auto/native: preserve F16/BF16 frozen base weights; fp32: promote all
+    std::string pm_schedule; // Opt-in delays after zero-based optimizer updates.
 };
 
 static void parse_args(int argc, char** argv, Args& args) {
@@ -81,7 +84,27 @@ static void parse_args(int argc, char** argv, Args& args) {
         else if (k == "--dump_first_batch_json") args.dump_first_batch_json = get("--dump_first_batch_json");
         else if (k == "--dump_only") args.dump_only = true;
         else if (k == "--base_weight_storage") args.base_weight_storage = get("--base_weight_storage");
+        else if (k == "--pm_schedule") args.pm_schedule = get("--pm_schedule");
     }
+}
+
+static void apply_power_delay(energy::PowerMonitor& monitor, int step,
+                              std::chrono::steady_clock::time_point start,
+                              std::ostream* metrics = nullptr) {
+    const auto sleep_start = std::chrono::steady_clock::now();
+    const double compute_s = std::chrono::duration<double>(sleep_start - start).count();
+    const int requested_ms = monitor.suggest_sleep_ms(step, compute_s * 1000.0);
+    if (requested_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(requested_ms));
+    const auto end = std::chrono::steady_clock::now();
+    const double sleep_s = std::chrono::duration<double>(end - sleep_start).count();
+    if (metrics) {
+        *metrics << (step + 1) << ',' << std::fixed << std::setprecision(6)
+                 << compute_s << ',' << requested_ms << ',' << sleep_s << ','
+                 << std::chrono::duration<double>(end - start).count() << '\n';
+        metrics->flush();
+    }
+    std::cout << "[Energy] update=" << (step + 1) << " requested_sleep_ms=" << requested_ms
+              << " observed_sleep_s=" << sleep_s << '\n';
 }
 
 static void require_file(const std::string& path, const std::string& desc) {
@@ -186,7 +209,7 @@ static void dump_batch_json(const Batch& batch, const std::string& path) {
     out << "\n}\n";
 }
 
-static int run_synthetic_smoke(const Args& args) {
+static int run_synthetic_smoke(const Args& args, energy::PowerMonitor& power_monitor) {
     std::cout << "\n========== Qwen LoRA Synthetic Smoke ==========\n";
 
     QwenConfig qcfg;
@@ -223,6 +246,7 @@ static int run_synthetic_smoke(const Args& args) {
 
     const int smoke_steps = std::max(1, args.smoke_steps);
     for (int step = 0; step < smoke_steps; ++step) {
+        const auto step_start = std::chrono::steady_clock::now();
         auto hidden = model.forward_hidden(input_ids, attention_mask);
         auto loss = selected_token_lm_cross_entropy(hidden, model.embedding_weight(), labels, -100, "mean");
         if (!smoke::is_finite_scalar(loss)) {
@@ -244,6 +268,8 @@ static int run_synthetic_smoke(const Args& args) {
         smoke::zero_grads(lora_params);
         smoke::cleanup_step_memory();
 
+        if (!args.pm_schedule.empty()) apply_power_delay(power_monitor, step, step_start);
+
         std::cout << "[smoke step " << (step + 1) << "/" << smoke_steps
                   << "] loss=" << loss->data<float>()[0]
                   << " grad_norm=" << grad_norm << std::endl;
@@ -259,10 +285,12 @@ static int run_synthetic_smoke(const Args& args) {
 
 int main(int argc, char** argv) {
     Args args;
-    parse_args(argc, argv, args);
     try {
+        parse_args(argc, argv, args);
+        energy::PowerMonitor power_monitor;
+        power_monitor.set_step_schedule(energy::PowerMonitor::parse_schedule(args.pm_schedule));
         if (args.synthetic_smoke) {
-            return run_synthetic_smoke(args);
+            return run_synthetic_smoke(args, power_monitor);
         }
 
         const bool use_jsonl =
@@ -294,6 +322,14 @@ int main(int argc, char** argv) {
             throw std::runtime_error("failed to open metrics file in output_dir");
         }
         metrics << "step,loss,step_time_s,elapsed_s\n";
+        std::ofstream energy_metrics;
+        if (!args.pm_schedule.empty()) {
+            energy_metrics.open(args.output_dir + "/energy_metrics.csv");
+            if (!energy_metrics.is_open()) throw std::runtime_error("failed to open energy_metrics.csv");
+            energy_metrics << "step,compute_time_s,requested_sleep_ms,observed_sleep_s,total_step_time_s\n";
+            std::cout << "[Energy] explicit delay schedule=" << args.pm_schedule
+                      << "; no automatic sensor polling or energy measurement\n";
+        }
 
         std::cout << "\n========== Qwen2.5-0.5B LoRA Finetune ("
                   << (use_jsonl ? "masked JSONL" : "WikiText-2")
@@ -477,6 +513,10 @@ int main(int argc, char** argv) {
 
                 opt.step(lora_params, grads);
                 for (auto& p : lora_params) p->zero_grad();
+
+                if (!args.pm_schedule.empty()) {
+                    apply_power_delay(power_monitor, step, step_start, &energy_metrics);
+                }
 
                 auto step_end = std::chrono::steady_clock::now();
                 double step_time_s = std::chrono::duration<double>(step_end - step_start).count();
