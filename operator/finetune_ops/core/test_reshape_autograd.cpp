@@ -15,7 +15,8 @@ static TensorPtr leaf() {
     x->set_requires_grad(true);
     return x;
 }
-static void check(const std::string& name, const TensorPtr& x, float expected) {
+static void check(const std::string& name, const TensorPtr& x, float expected,
+                  const TensorPtr& output = nullptr) {
     double error = 0;
     const auto grad = x->grad();
     const bool layout_valid = grad && grad->shape() == x->shape() && grad->dtype() == x->dtype();
@@ -23,16 +24,19 @@ static void check(const std::string& name, const TensorPtr& x, float expected) {
         error = std::isfinite(grad->data<float>()[i])
             ? std::max(error, double(std::abs(grad->data<float>()[i] - expected)))
             : std::numeric_limits<double>::infinity();
-    const bool pass = layout_valid && error < 1e-6;
+    const bool nonleaf_ok = !output || !output->is_leaf();
+    const bool pass = layout_valid && error < 1e-6 && nonleaf_ok;
     failures += !pass;
     std::cout << "{\"test\":\"" << name << "\",\"expected\":" << expected
               << ",\"actual\":" << (layout_valid ? grad->data<float>()[0] : -999)
-              << ",\"max_error\":" << error << ",\"passed\":" << (pass ? "true" : "false") << "}\n";
+              << ",\"max_error\":" << error << ",\"nonleaf_checked\":" << (output ? "true" : "false")
+              << ",\"nonleaf_ok\":" << (nonleaf_ok ? "true" : "false")
+              << ",\"passed\":" << (pass ? "true" : "false") << "}\n";
 }
 static void run_ops() {
     { auto x=leaf(); auto y=mul(x,1.0f); y->backward(ones(y->shape())); check("identity_op_control",x,1); }
-    { auto x=leaf(); auto y=x->reshape({3,2}); y->backward(ones(y->shape())); check("member_reshape",x,1); }
-    { auto x=leaf(); auto y=x->view({3,2}); y->backward(ones(y->shape())); check("member_view",x,1); }
+    { auto x=leaf(); auto y=x->reshape({3,2}); y->backward(ones(y->shape())); check("member_reshape",x,1,y); }
+    { auto x=leaf(); auto y=x->view({3,2}); y->backward(ones(y->shape())); check("member_view",x,1,y); }
     for (int depth=2; depth<=3; ++depth) {
         auto x=leaf(), y=x;
         for(int i=0;i<depth;++i) y=y->reshape(i%2 ? std::vector<int64_t>{2,3}:std::vector<int64_t>{3,2});
@@ -42,14 +46,14 @@ static void run_ops() {
     for (int depth=1; depth<=3; ++depth) {
         auto x=leaf(), y=x;
         for(int i=0;i<depth;++i) y=reshape(y,i%2 ? std::vector<int64_t>{2,3}:std::vector<int64_t>{3,2});
-        y->backward(ones(y->shape())); check("ops_reshape_depth_"+std::to_string(depth),x,1);
+        y->backward(ones(y->shape())); check("ops_reshape_depth_"+std::to_string(depth),x,1,y);
     }
     { auto x=leaf(); auto y=add(x,reshape(reshape(x,{3,2}),{2,3})); y->backward(ones(y->shape())); check("residual_two_reshapes",x,2); }
     { auto x=leaf(); auto y=add(x,x); y->backward(ones(y->shape())); check("legitimate_repeated_input_add",x,2); }
     { auto x=leaf(); auto y=mul(x,x); y->backward(ones(y->shape())); check("legitimate_repeated_input_mul",x,2); }
     { auto x=leaf(); auto y=transpose(x,0,1); y->backward(ones(y->shape())); check("transpose_control",x,1); }
     { auto x=leaf(); auto y=reshape(transpose(x,0,1),{6}); y->backward(ones(y->shape())); check("transpose_then_reshape",x,1); }
-    { auto x=ones({2,3}); auto y=reshape(x,{3,2}); bool pass=!y->requires_grad(); failures+=!pass;
+    { auto x=ones({2,3}); auto y=reshape(x,{3,2}); bool pass=!y->requires_grad() && y->is_leaf(); failures+=!pass;
       std::cout << "{\"test\":\"frozen_input\",\"passed\":" << (pass?"true":"false") << "}\n"; }
 }
 static void run_lora(bool external_reshape) {
