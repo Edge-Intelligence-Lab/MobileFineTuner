@@ -141,6 +141,13 @@ std::vector<TensorPtr> MatmulBackward::apply(const TensorPtr& grad_output) {
         if (grad_b && grad_b->shape() != b_shape) {
             grad_b = sum_to_shape(grad_b, b_shape);
         }
+
+        // Parameter gradients are always accumulated in FP32.
+        // The parameter itself may remain BF16.
+        if (grad_b && b_ && b_->requires_grad() &&
+            grad_b->dtype() != DType::kFloat32) {
+            grad_b = cast(grad_b, DType::kFloat32);
+        }
     }
 
     return {grad_a, grad_b};
@@ -438,12 +445,18 @@ std::vector<TensorPtr> LayerNormBackward::apply(const TensorPtr& grad_output) {
     int64_t batch = input_->numel() / D;
 
     // Gradients
-    auto grad_input = zeros(shape, input_->dtype(), input_->device());
-    auto grad_weight = zeros(weight_->shape(), weight_->dtype(), weight_->device());
-    auto grad_bias = zeros(weight_->shape(), weight_->dtype(), weight_->device());
+    auto grad_input = zeros(shape, DType::kFloat32, input_->device());
+    auto grad_weight = zeros(weight_->shape(), kFloat32, weight_->device());
+    auto grad_bias = zeros(weight_->shape(), kFloat32, weight_->device());
+
+    // LayerNorm always computes in FP32. BF16 parameters are decoded
+    // to FP32 for the backward calculation.
+    auto weight_fp32 = (weight_->dtype() == DType::kFloat32)
+        ? weight_
+        : cast(weight_, DType::kFloat32);
 
     const float* x = input_->data<float>();
-    const float* w = weight_->data<float>();
+    const float* w = weight_fp32->data<float>();
     const float* gy = grad_output->data<float>();
     float* gx = grad_input->data<float>();
     float* gw = grad_weight->data<float>();
@@ -495,10 +508,13 @@ std::vector<TensorPtr> RMSNormBackward::apply(const TensorPtr& grad_output) {
     int64_t D = shape.back();
     int64_t batch = input_->numel() / D;
     auto grad_input = zeros(shape, input_->dtype(), input_->device());
-    auto grad_weight = zeros(weight_->shape(), weight_->dtype(), weight_->device());
+    auto grad_weight = zeros(weight_->shape(), kFloat32, weight_->device());
 
     const float* x = input_->data<float>();
-    const float* w = weight_->data<float>();
+    auto weight_fp32 = (weight_->dtype() == DType::kFloat32)
+        ? weight_
+        : cast(weight_, DType::kFloat32);
+    const float* w = weight_fp32->data<float>();
     const float* gy = grad_output->data<float>();
     float* gx = grad_input->data<float>();
     float* gw = grad_weight->data<float>();

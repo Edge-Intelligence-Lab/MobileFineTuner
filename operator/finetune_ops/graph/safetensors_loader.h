@@ -35,6 +35,7 @@ struct SafeTensorInfo {
 struct SafeTensorsLoadOptions {
     bool transpose_linear = true;   // auto-transpose Linear weights [out,in]→[in,out]
     bool auto_promote_fp16 = true;  // auto-promote FP16 to FP32
+    bool convert_f32_to_bf16 = false; // convert F32 weights to BF16 while loading
     bool verbose = true;            // print load logs
     bool strict_shape_check = true; // strict shape validation
     // Preserve original F16/BF16 storage for matching internal or HF keys even

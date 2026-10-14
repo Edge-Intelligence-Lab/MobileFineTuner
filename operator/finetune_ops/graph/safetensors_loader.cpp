@@ -167,12 +167,14 @@ TensorPtr SafeTensorsReader::read_tensor_data(const SafeTensorInfo& info, bool t
         numel *= dim;
     }
 
+    // element_size describes the bytes stored in the source SafeTensors file.
+    // target_dtype describes how the tensor will be represented in RAM.
     size_t element_size = 4;
     DType target_dtype = kFloat32;
 
     if (info.dtype == "F32") {
         element_size = 4;
-        target_dtype = kFloat32;
+        target_dtype = preserve_low_precision ? kBFloat16 : kFloat32;
     } else if (info.dtype == "F16") {
         element_size = 2;
         target_dtype = preserve_low_precision ? kFloat16 : kFloat32;
@@ -242,8 +244,21 @@ TensorPtr SafeTensorsReader::read_tensor_data(const SafeTensorInfo& info, bool t
     };
 
     if (info.dtype == "F32") {
-        std::memcpy(tensor->data<float>(), raw_data.data(), byte_size);
-        transpose_buffer_float(tensor->data<float>());
+        const float* fp32_data =
+            reinterpret_cast<const float*>(raw_data.data());
+
+        if (target_dtype == kBFloat16) {
+            uint16_t* bf16_data = tensor->data<uint16_t>();
+
+            for (int64_t i = 0; i < numel; ++i) {
+                bf16_data[i] = float32_to_bf16_bits(fp32_data[i]);
+            }
+
+            transpose_buffer_u16(bf16_data);
+        } else {
+            std::memcpy(tensor->data<float>(), raw_data.data(), byte_size);
+            transpose_buffer_float(tensor->data<float>());
+        }
     } else if (info.dtype == "F16") {
         const uint16_t* fp16_data = reinterpret_cast<const uint16_t*>(raw_data.data());
         if (target_dtype == kFloat16) {
@@ -304,6 +319,11 @@ SafeTensorsReader::load_tensors_mapped(
                         it->second.shape.size() == 2;
         
         bool preserve_low_precision = !options.auto_promote_fp16;
+
+        if (options.convert_f32_to_bf16 && it->second.dtype == "F32") {
+            preserve_low_precision = true;
+        }
+
         if (options.auto_promote_fp16) {
             for (const auto& needle : options.preserve_low_precision_key_substrings) {
                 if ((!needle.empty()) &&
@@ -471,12 +491,12 @@ GPT2KeyMapper::generate_gpt2_mapping(int num_layers) {
     std::unordered_map<std::string, std::string> mapping;
     
     // Embeddings
-    mapping["wte.weight"] = "wte.weight";
-    mapping["wpe.weight"] = "wpe.weight";
+    mapping["wte.weight"] = "transformer.wte.weight";
+    mapping["wpe.weight"] = "transformer.wpe.weight";
     
     // Transformer blocks
     for (int i = 0; i < num_layers; ++i) {
-        std::string hf_prefix = "h." + std::to_string(i) + ".";
+        std::string hf_prefix = "transformer.h." + std::to_string(i) + ".";
         std::string internal_prefix = "blocks." + std::to_string(i) + ".";
         
         // LayerNorm 1
@@ -501,8 +521,8 @@ GPT2KeyMapper::generate_gpt2_mapping(int num_layers) {
     }
     
     // Final LayerNorm
-    mapping["ln_f.weight"] = "ln_f.weight";
-    mapping["ln_f.bias"] = "ln_f.bias";
+    mapping["ln_f.weight"] = "transformer.ln_f.weight";
+    mapping["ln_f.bias"] = "transformer.ln_f.bias";
     
     // lm_head (typically tied with wte; enable below if loading separately)
     // mapping["lm_head.weight"] = "lm_head.weight";

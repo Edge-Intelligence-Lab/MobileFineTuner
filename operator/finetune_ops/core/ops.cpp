@@ -9,6 +9,7 @@
  */
 
 #include "ops.h"
+#include <type_traits>
 #include "backward_functions.h"
 #include "autograd_engine.h"
 #include <cmath>
@@ -296,10 +297,18 @@ namespace {
         return result_shape;
     }
 
+    template<typename T>
+    inline float read_element_as_float(const TensorPtr& t, int64_t index) {
+        if constexpr (std::is_same_v<T, uint16_t>) {
+            return bf16_bits_to_float32(t->data<uint16_t>()[index]);
+        } else {
+            return t->data<float>()[index];
+        }
+    }
+
     template<typename Op>
     TensorPtr elementwise_binary_op(const TensorPtr& a, const TensorPtr& b, Op op) {
         if (!can_broadcast(a, b)) {
-            // 🔧 添加详细错误信息
             std::string msg = "Tensors cannot be broadcasted: shape_a=[";
             for (size_t i = 0; i < a->shape().size(); ++i) {
                 msg += std::to_string(a->shape()[i]);
@@ -314,63 +323,84 @@ namespace {
             throw TensorError(msg);
         }
 
+        if (!DTypeUtils::is_floating_point(a->dtype()) ||
+            !DTypeUtils::is_floating_point(b->dtype())) {
+            throw TensorError("elementwise_binary_op: only floating-point tensors are supported");
+        }
+
         auto result_shape = broadcast_shapes(a, b);
         auto result = zeros(result_shape, a->dtype(), a->device());
 
-        if (shapes_equal(a, b)) {
-            const float* data_a = a->data<float>();
-            const float* data_b = b->data<float>();
-            float* result_data = result->data<float>();
-
-            for (int64_t i = 0; i < a->numel(); ++i) {
-                result_data[i] = op(data_a[i], data_b[i]);
+        auto read_value = [](const TensorPtr& t, int64_t index) -> float {
+            switch (t->dtype()) {
+                case kFloat32:
+                    return t->data<float>()[index];
+                case kBFloat16:
+                    return bf16_bits_to_float32(t->data<uint16_t>()[index]);
+                case kFloat16:
+                    return fp16_bits_to_float32(t->data<uint16_t>()[index]);
+                default:
+                    throw TensorError("elementwise_binary_op: unsupported dtype");
             }
-        } else {
-            // Complete broadcast implementsation
-            const float* data_a = a->data<float>();
-            const float* data_b = b->data<float>();
-            float* result_data = result->data<float>();
-            
-            auto shape_a = a->shape();
-            auto shape_b = b->shape();
-            
-            for (int64_t i = 0; i < result->numel(); ++i) {
-                // Calculate multidimensional index of current position in result
+        };
+
+        auto write_value = [](const TensorPtr& t, int64_t index, float value) {
+            switch (t->dtype()) {
+                case kFloat32:
+                    t->data<float>()[index] = value;
+                    break;
+                case kBFloat16:
+                    t->data<uint16_t>()[index] = float32_to_bf16_bits(value);
+                    break;
+                case kFloat16:
+                    t->data<uint16_t>()[index] = float32_to_fp16_bits(value);
+                    break;
+                default:
+                    throw TensorError("elementwise_binary_op: unsupported output dtype");
+            }
+        };
+
+        auto shape_a = a->shape();
+        auto shape_b = b->shape();
+
+        for (int64_t i = 0; i < result->numel(); ++i) {
+            int64_t idx_a = 0;
+            int64_t idx_b = 0;
+
+            if (shapes_equal(a, b)) {
+                idx_a = i;
+                idx_b = i;
+            } else {
                 std::vector<int64_t> result_idx(result_shape.size());
                 int64_t temp = i;
-                for (int j = result_shape.size() - 1; j >= 0; --j) {
+
+                for (int j = static_cast<int>(result_shape.size()) - 1; j >= 0; --j) {
                     result_idx[j] = temp % result_shape[j];
                     temp /= result_shape[j];
                 }
-                
-                // Calculate corresponding indices for a and b (simplified version)
-                int64_t idx_a = 0, idx_b = 0;
-                
-                // Calculate linear index for a
+
                 for (size_t dim = 0; dim < shape_a.size(); ++dim) {
-                    int result_dim = dim + (result_shape.size() - shape_a.size());
-                    if (result_dim >= 0) {
-                        int64_t coord = (shape_a[dim] == 1) ? 0 : result_idx[result_dim];
-                        idx_a = idx_a * shape_a[dim] + coord;
-                    }
+                    int result_dim = static_cast<int>(dim) +
+                                     static_cast<int>(result_shape.size() - shape_a.size());
+                    int64_t coord = (shape_a[dim] == 1) ? 0 : result_idx[result_dim];
+                    idx_a = idx_a * shape_a[dim] + coord;
                 }
-                
-                // Calculate linear index for b
+
                 for (size_t dim = 0; dim < shape_b.size(); ++dim) {
-                    int result_dim = dim + (result_shape.size() - shape_b.size());
-                    if (result_dim >= 0) {
-                        int64_t coord = (shape_b[dim] == 1) ? 0 : result_idx[result_dim];
-                        idx_b = idx_b * shape_b[dim] + coord;
-                    }
+                    int result_dim = static_cast<int>(dim) +
+                                     static_cast<int>(result_shape.size() - shape_b.size());
+                    int64_t coord = (shape_b[dim] == 1) ? 0 : result_idx[result_dim];
+                    idx_b = idx_b * shape_b[dim] + coord;
                 }
-                
-                result_data[i] = op(data_a[idx_a], data_b[idx_b]);
             }
+
+            const float va = read_value(a, idx_a);
+            const float vb = read_value(b, idx_b);
+            write_value(result, i, op(va, vb));
         }
 
         if (a->requires_grad() || b->requires_grad()) {
             result->set_requires_grad(true);
-
         }
 
         return result;
@@ -637,9 +667,8 @@ TensorPtr matmul(const TensorPtr& a, const TensorPtr& b) {
     if (b->dtype() != kFloat32 && !is_lowp_float(b->dtype())) {
         throw TensorError("matmul: unsupported right operand dtype " + DTypeUtils::to_string(b->dtype()));
     }
-    if (is_lowp_float(b->dtype()) && b->requires_grad()) {
-        throw TensorError("matmul: low-precision trainable right operand is not supported; keep trainable weights FP32");
-    }
+    // BF16 trainable right operands are supported.
+    // Compute kernels accumulate into FP32 output; gradients remain FP32.
 
     int64_t m = shape_a[shape_a.size() - 2];
     int64_t k = shape_a[shape_a.size() - 1];
@@ -844,9 +873,8 @@ TensorPtr matmul_rhs_T(const TensorPtr& a, const TensorPtr& b) {
     if (b->dtype() != kFloat32 && !is_lowp_float(b->dtype())) {
         throw TensorError("matmul_rhs_T: unsupported right operand dtype " + DTypeUtils::to_string(b->dtype()));
     }
-    if (is_lowp_float(b->dtype()) && b->requires_grad()) {
-        throw TensorError("matmul_rhs_T: low-precision trainable right operand is not supported; keep trainable weights FP32");
-    }
+    // BF16 trainable right operands are supported here as well.
+    // The result and computed gradients remain FP32.
     
     int64_t n = shape_b[0];
     int64_t k_b = shape_b[1];
@@ -1595,9 +1623,30 @@ TensorPtr layer_norm(const TensorPtr& input, const TensorPtr& weight, const Tens
 
     auto result = zeros(input_shape, input->dtype(), input->device());
     const float* input_data = input->data<float>();
-    const float* weight_data = weight->data<float>();
-    const float* bias_data = bias->data<float>();
+
+    const float* weight_data_fp32 =
+        (weight->dtype() == kFloat32) ? weight->data<float>() : nullptr;
+    const uint16_t* weight_data_bf16 =
+        (weight->dtype() == kBFloat16) ? weight->data<uint16_t>() : nullptr;
+
+    const float* bias_data_fp32 =
+        (bias->dtype() == kFloat32) ? bias->data<float>() : nullptr;
+    const uint16_t* bias_data_bf16 =
+        (bias->dtype() == kBFloat16) ? bias->data<uint16_t>() : nullptr;
+
     float* result_data = result->data<float>();
+
+    auto read_weight = [&](int64_t i) -> float {
+        if (weight_data_fp32) return weight_data_fp32[i];
+        if (weight_data_bf16) return bf16_bits_to_float32(weight_data_bf16[i]);
+        throw TensorError("layer_norm: unsupported weight dtype");
+    };
+
+    auto read_bias = [&](int64_t i) -> float {
+        if (bias_data_fp32) return bias_data_fp32[i];
+        if (bias_data_bf16) return bf16_bits_to_float32(bias_data_bf16[i]);
+        throw TensorError("layer_norm: unsupported bias dtype");
+    };
 
     int64_t batch_size = input->numel() / normalized_dim;
 
@@ -1621,7 +1670,7 @@ TensorPtr layer_norm(const TensorPtr& input, const TensorPtr& weight, const Tens
         float inv_std = 1.0f / std::sqrt(variance + eps);
         for (int64_t i = 0; i < normalized_dim; ++i) {
             float normalized = (batch_input[i] - mean) * inv_std;
-            batch_result[i] = normalized * weight_data[i] + bias_data[i];
+            batch_result[i] = normalized * read_weight(i) + read_bias(i);
         }
     }
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(Operators VERSION 2.0.0 LANGUAGES CXX)
+project(Operators VERSION 2.0.0 LANGUAGES C CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
@@ -575,3 +575,137 @@ message(STATUS "  - Build tests: ${BUILD_TESTS}")
 message(STATUS "  - Profiling: ${ENABLE_PROFILING}")
 message(STATUS "============================================")
 message(STATUS "")
+
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/optim/test_gpt2_fullft_10step.cpp)
+    add_executable(test_gpt2_fullft_10step
+        finetune_ops/optim/test_gpt2_fullft_10step.cpp
+    )
+    target_link_libraries(test_gpt2_fullft_10step operators)
+    add_test(
+        NAME GPT2FullFT10Step
+        COMMAND test_gpt2_fullft_10step
+    )
+endif()
+
+add_executable(test_gpt2_fullft_124m
+    finetune_ops/optim/test_gpt2_fullft_124m.cpp
+)
+
+target_link_libraries(test_gpt2_fullft_124m PRIVATE operators)
+
+add_test(
+    NAME GPT2FullFT124M
+    COMMAND test_gpt2_fullft_124m
+)
+
+
+
+add_executable(test_gpt2_tokenizer_parity
+    finetune_ops/core/test_gpt2_tokenizer_parity.cpp
+)
+
+target_link_libraries(test_gpt2_tokenizer_parity PRIVATE operators)
+
+add_test(
+    NAME GPT2TokenizerParity
+    COMMAND test_gpt2_tokenizer_parity
+)
+
+
+add_executable(test_gpt2_fullft_real
+    finetune_ops/optim/test_gpt2_fullft_real.cpp
+)
+
+target_link_libraries(test_gpt2_fullft_real PRIVATE operators)
+
+add_test(
+    NAME GPT2FullFTReal
+    COMMAND test_gpt2_fullft_real
+)
+
+add_executable(test_gpt2_bf16_load_only
+    finetune_ops/optim/test_gpt2_bf16_load_only.cpp
+)
+target_link_libraries(test_gpt2_bf16_load_only PRIVATE operators)
+
+
+# ------------------------------------------------------------
+# ARM64 native numerical backend
+# ------------------------------------------------------------
+
+add_executable(test_arm64_neon_gemm
+    finetune_ops/core/test_arm64_neon_gemm.cpp
+    finetune_ops/core/arm64_neon_kernels.c
+)
+
+target_link_libraries(test_arm64_neon_gemm
+    PRIVATE
+    pthread
+)
+
+add_test(
+    NAME ARM64NEONGEMM
+    COMMAND test_arm64_neon_gemm
+)
+
+add_executable(test_adam_bf16_param
+    finetune_ops/optim/test_adam_bf16_param.cpp
+)
+target_link_libraries(test_adam_bf16_param PRIVATE operators)
+
+add_executable(test_bf16_storage_diag
+    finetune_ops/optim/test_bf16_storage_diag.cpp
+)
+target_link_libraries(test_bf16_storage_diag PRIVATE operators)
+
+add_executable(test_bf16_direct_write
+    finetune_ops/optim/test_bf16_direct_write.cpp
+)
+target_link_libraries(test_bf16_direct_write PRIVATE operators)
+
+add_executable(test_adam_bf16_param_strict
+    finetune_ops/optim/test_adam_bf16_param_strict.cpp
+)
+target_link_libraries(test_adam_bf16_param_strict PRIVATE operators)
+
+add_executable(test_bf16_weight_pipeline
+    finetune_ops/optim/test_bf16_weight_pipeline.cpp
+)
+target_link_libraries(test_bf16_weight_pipeline PRIVATE operators)
+
+
+add_executable(test_gpt2_bf16_forward_safe
+    finetune_ops/optim/test_gpt2_bf16_forward_safe.cpp
+)
+target_link_libraries(test_gpt2_bf16_forward_safe PRIVATE operators)
+
+
+add_executable(test_gpt2_bf16_final_safe
+    finetune_ops/optim/test_gpt2_bf16_final_safe.cpp
+)
+target_link_libraries(test_gpt2_bf16_final_safe PRIVATE operators)
+
+
+add_executable(test_gpt2_bf16_10step_safe
+    finetune_ops/optim/test_gpt2_bf16_10step_safe.cpp
+)
+
+target_link_libraries(test_gpt2_bf16_10step_safe
+    PRIVATE operators
+)
+
+add_executable(test_gpt2_bf16_real_causal_ft
+    finetune_ops/optim/test_gpt2_bf16_real_causal_ft.cpp
+)
+
+target_link_libraries(test_gpt2_bf16_real_causal_ft
+    PRIVATE operators
+)
+
+add_executable(test_gpt2_bf16_ultimate
+    finetune_ops/optim/test_gpt2_bf16_ultimate.cpp
+)
+
+target_link_libraries(test_gpt2_bf16_ultimate
+    PRIVATE operators
+)

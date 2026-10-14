@@ -42,6 +42,74 @@ MobileFineTuner is an open-source C++ framework for practical, privacy-preservin
 
 Unlike simulation-based or desktop-bound approaches, MobileFineTuner is built around a lean native C++ implementation that eliminates Python runtime overhead in the training path and supports both Full Fine-Tuning (Full-FT) and Parameter-Efficient Fine-Tuning (PEFT/LoRA) under tight resource constraints.
 
+### Experimental: Persistent BF16 Full Fine-Tuning
+
+This fork adds an experimental persistent-BF16 parameter path for native C++ Full Fine-Tuning.
+
+#### What changed
+
+- Model parameters can be stored persistently as **BF16** instead of FP32.
+- Forward activations and backward computations use FP32 where required.
+- Trainable gradients are maintained in **FP32**.
+- Adam optimizer moments remain **FP32**, while parameters are written back to BF16.
+- SafeTensors loading can convert FP32 source weights to BF16 parameter storage.
+- BF16-aware backward paths were added for LayerNorm, RMSNorm, MatMul, and gradient accumulation.
+- BF16 storage, optimizer, tokenizer-parity, and end-to-end training tests are included.
+
+#### GPT-2 124M validation
+
+The BF16 path was validated with a native C++ build on an ARM64 Android device using Termux/PRoot Debian.
+
+GPT-2 configuration:
+
+- 124,439,808 parameters
+- 12 layers
+- 768 hidden size
+- 12 attention heads
+- vocabulary size 50,257
+- context length 1,024
+
+Full-model BF16 storage validation:
+
+- 148 BF16 parameter tensors
+- 0 FP32 parameter tensors
+- 248,879,616 parameter bytes
+- 237.35 MiB parameter storage
+- approximately half the parameter-storage footprint of FP32
+
+A full 124M forward pass completed successfully with finite FP32 logits.
+
+A full-model 10-step BF16 Full-FT safety run completed successfully:
+
+- 10/10 forward passes
+- 10/10 backward passes
+- 10/10 FP32 Adam updates
+- gradients cleared after every step
+- parameters remained BF16 throughout the run
+
+#### Real-data experiment
+
+A separate 20-step causal Full-FT experiment was run on a Classical Tamil dataset using the native GPT-2 tokenizer.
+
+Configuration:
+
+- batch size: 1
+- maximum sequence length: 32
+- learning rate: 5e-6
+- Adam β1: 0.9
+- Adam β2: 0.999
+- weight decay: 0
+- 20 optimization steps
+
+Recorded loss:
+
+- Step 1: 8.57498
+- Step 20: 5.37094
+
+This demonstrates that the BF16 parameter path can execute a real native training workload on a mobile-class ARM64 device. The loss change alone is not evidence of improved model quality or convergence.
+
+> **Scope:** This is an experimental engineering extension of MobileFineTuner, not a new optimization algorithm. It is intended for reproducibility, systems experimentation, and further research into memory-constrained on-device training.
+
 ### Verified Scope
 
 - Stable C++ operator/autograd/LoRA core with unit tests and installable CMake package.

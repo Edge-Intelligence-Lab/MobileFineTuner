@@ -27,64 +27,102 @@ void Adam::step(const std::vector<TensorPtr>& parameters,
     if (parameters.size() != gradients.size()) {
         throw std::runtime_error("Parameters and gradients size mismatch");
     }
-    
+
     for (size_t i = 0; i < parameters.size(); ++i) {
         auto& param = parameters[i];
         auto& grad = gradients[i];
-        
-        if (!grad) continue;  // Skip if no gradient
-        
-        // Initialize state if needed
+
+        if (!param) continue;
+        if (!grad) continue;
+
+        if (param->dtype() != kFloat32 && param->dtype() != kBFloat16) {
+            throw std::runtime_error(
+                "Adam: parameter dtype must be float32 or bfloat16");
+        }
+
+        if (grad->dtype() != kFloat32) {
+            throw std::runtime_error(
+                "Adam: gradients must remain float32");
+        }
+
         if (states_.find(param) == states_.end()) {
             init_state(param);
         }
-        
+
         auto& state = states_[param];
         state.step++;
-        
-        // Get current parameter and gradient data
+
         const float* grad_data = grad->data<float>();
-        float* param_data = param->data<float>();
+
+        float* param_fp32 = nullptr;
+        uint16_t* param_bf16 = nullptr;
+
+        if (param->dtype() == kFloat32) {
+            param_fp32 = param->data<float>();
+        } else {
+            param_bf16 = param->data<uint16_t>();
+        }
+
         float* m_data = state.m[0]->data<float>();
         float* v_data = state.v[0]->data<float>();
+
         float* v_hat_data = nullptr;
-        
         if (adam_config_.amsgrad && !state.v_hat.empty()) {
             v_hat_data = state.v_hat[0]->data<float>();
         }
-        
-        // Compute bias correction factors
-        float bias_correction1 = compute_bias_correction1(state.step);
-        float bias_correction2 = compute_bias_correction2(state.step);
-        
-        // Update parameters
+
+        const float bias_correction1 =
+            compute_bias_correction1(state.step);
+        const float bias_correction2 =
+            compute_bias_correction2(state.step);
+
         for (int64_t j = 0; j < param->numel(); ++j) {
-            float grad_val = grad_data[j];
-            
-            // Apply weight decay if specified
+            const float param_value =
+                (param->dtype() == kBFloat16)
+                    ? bf16_bits_to_float32(param_bf16[j])
+                    : param_fp32[j];
+
+            float grad_value = grad_data[j];
+
             if (adam_config_.weight_decay > 0.0f) {
-                grad_val += adam_config_.weight_decay * param_data[j];
+                grad_value +=
+                    adam_config_.weight_decay * param_value;
             }
-            
-            // Update biased first moment estimate
-            m_data[j] = adam_config_.beta1 * m_data[j] + (1.0f - adam_config_.beta1) * grad_val;
-            
-            // Update biased second raw moment estimate
-            v_data[j] = adam_config_.beta2 * v_data[j] + (1.0f - adam_config_.beta2) * grad_val * grad_val;
-            
-            float v_corrected = v_data[j] / bias_correction2;
-            
-            // AMSGrad variant
+
+            m_data[j] =
+                adam_config_.beta1 * m_data[j] +
+                (1.0f - adam_config_.beta1) * grad_value;
+
+            v_data[j] =
+                adam_config_.beta2 * v_data[j] +
+                (1.0f - adam_config_.beta2) *
+                    grad_value * grad_value;
+
+            float v_corrected =
+                v_data[j] / bias_correction2;
+
             if (adam_config_.amsgrad && v_hat_data) {
-                v_hat_data[j] = std::max(v_hat_data[j], v_corrected);
+                v_hat_data[j] =
+                    std::max(v_hat_data[j], v_corrected);
                 v_corrected = v_hat_data[j];
             }
-            
-            // Compute bias-corrected first moment estimate
-            float m_corrected = m_data[j] / bias_correction1;
-            
-            // Update parameters
-            param_data[j] -= adam_config_.learning_rate * m_corrected / (std::sqrt(v_corrected) + adam_config_.epsilon);
+
+            const float m_corrected =
+                m_data[j] / bias_correction1;
+
+            const float updated_value =
+                param_value -
+                adam_config_.learning_rate *
+                    m_corrected /
+                    (std::sqrt(v_corrected) +
+                     adam_config_.epsilon);
+
+            if (param->dtype() == kBFloat16) {
+                param_bf16[j] =
+                    float32_to_bf16_bits(updated_value);
+            } else {
+                param_fp32[j] = updated_value;
+            }
         }
     }
 }
