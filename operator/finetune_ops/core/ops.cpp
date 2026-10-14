@@ -1903,24 +1903,20 @@ TensorPtr layer_norm(const TensorPtr& input, const TensorPtr& weight, const Tens
 
 TensorPtr reshape(const TensorPtr& tensor, const std::vector<int64_t>& shape) {
     auto result = tensor->reshape(shape);
-    
-    // settingsgradientpropagate
+
+    // Tensor::reshape already registers the backward edge in the new engine.
+    // Re-registering it here would accumulate the same gradient twice.
+    #ifndef USE_NEW_AUTOGRAD_ENGINE
     if (tensor->requires_grad()) {
         result->set_requires_grad(true);
-        
-        auto backward_fn = std::make_shared<ReshapeBackward>(tensor->shape());
-        
-        #ifdef USE_NEW_AUTOGRAD_ENGINE
-        register_backward(result, {tensor}, backward_fn);
-        #else
         result->set_grad_fn([tensor, original_shape = tensor->shape()](const TensorPtr& grad_output) -> std::vector<TensorPtr> {
             // [Translated comment removed - see documentation]
             auto grad_input = grad_output->reshape(original_shape);
             accumulate_gradient(tensor, grad_input);
             return {};
         });
-        #endif
     }
+    #endif
     
     return result;
 }

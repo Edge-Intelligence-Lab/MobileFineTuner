@@ -273,7 +273,12 @@ TensorPtr Tensor::reshape(const std::vector<int64_t>& new_shape) const {
 
     if (requires_grad_) {
         result->set_requires_grad(true);
-        
+
+        #ifdef USE_NEW_AUTOGRAD_ENGINE
+        auto backward_fn = std::make_shared<ReshapeBackward>(shape_);
+        autograd::Engine::instance().register_node(result, {shared_from_this_or_clone()}, backward_fn);
+        #endif
+        // Keep the legacy callback and its non-leaf classification unchanged.
         // [Translated comment removed - see documentation]
         auto original_shape = shape_;
         result->set_grad_fn([original_shape](const TensorPtr& grad_output) -> std::vector<TensorPtr> {

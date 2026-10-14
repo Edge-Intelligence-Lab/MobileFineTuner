@@ -313,6 +313,20 @@ if(BUILD_TESTS)
     
     # Autograd engine tests
     if(USE_NEW_AUTOGRAD_ENGINE)
+        add_executable(test_reshape_autograd
+            finetune_ops/core/test_reshape_autograd.cpp
+        )
+        target_link_libraries(test_reshape_autograd PRIVATE operators)
+        add_test(NAME ReshapeAutograd COMMAND test_reshape_autograd)
+
+        add_executable(test_qwen_reshape_fd
+            finetune_ops/graph/test_qwen_reshape_fd.cpp
+        )
+        target_link_libraries(test_qwen_reshape_fd PRIVATE operators)
+        add_test(NAME QwenReshapeFiniteDifference
+            COMMAND test_qwen_reshape_fd "${CMAKE_CURRENT_BINARY_DIR}/qwen_reshape_fd.csv"
+        )
+
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_autograd_engine.cpp)
             add_executable(test_autograd_engine
                 ../tests/test_autograd_engine.cpp
