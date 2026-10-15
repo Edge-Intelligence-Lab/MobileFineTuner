@@ -8,6 +8,7 @@
  */
 
 #include "tensor.h"
+#include "tensor_copy.h"
 #include "memory_manager.h"
 #include "../memory/arena_allocator.h"
 #include "ops.h"
@@ -329,27 +330,9 @@ TensorPtr Tensor::transpose(int dim0, int dim1) const {
         }
     } else {
 
-        std::vector<int64_t> src_indices(ndim(), 0);
-
-        for (int64_t linear_idx = 0; linear_idx < numel(); ++linear_idx) {
-
-            int64_t temp = linear_idx;
-            for (int d = ndim() - 1; d >= 0; --d) {
-                src_indices[d] = temp % shape_[d];
-                temp /= shape_[d];
-            }
-
-            std::swap(src_indices[dim0], src_indices[dim1]);
-
-            int64_t dst_linear_idx = 0;
-            int64_t stride = 1;
-            for (int d = ndim() - 1; d >= 0; --d) {
-                dst_linear_idx += src_indices[d] * stride;
-                stride *= new_shape[d];
-            }
-
-            copy_element(dst_linear_idx, linear_idx);
-        }
+        auto source_strides = detail::dense_strides(shape_);
+        std::swap(source_strides[dim0], source_strides[dim1]);
+        detail::copy_permuted(src_data, dst_data, new_shape, source_strides, numel(), elem_size);
     }
 
     if (requires_grad_) {
