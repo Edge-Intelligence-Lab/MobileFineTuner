@@ -310,6 +310,16 @@ if(BUILD_TESTS)
     add_executable(test_power_monitor finetune_ops/energy/test_power_monitor.cpp)
     target_link_libraries(test_power_monitor PRIVATE operators)
     add_test(NAME PowerMonitor COMMAND test_power_monitor)
+
+    add_executable(test_tensor_iteration finetune_ops/optim/test_tensor_iteration.cpp)
+    target_link_libraries(test_tensor_iteration PRIVATE operators)
+    add_test(NAME TensorIteration COMMAND test_tensor_iteration)
+
+    if(USE_NEW_AUTOGRAD_ENGINE)
+        add_executable(test_qwen_head finetune_ops/optim/test_qwen_head.cpp)
+        target_link_libraries(test_qwen_head PRIVATE operators)
+        add_test(NAME QwenHead COMMAND test_qwen_head)
+    endif()
     
     # Autograd engine tests
     if(USE_NEW_AUTOGRAD_ENGINE)
