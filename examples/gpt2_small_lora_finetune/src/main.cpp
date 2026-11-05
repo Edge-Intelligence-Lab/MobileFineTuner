@@ -2,9 +2,11 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <chrono>
 #include <string>
 #include <vector>
 #include <cstdlib>
+#include <cstdio>
 #include <cmath>
 #include <algorithm>
 #include <filesystem>
@@ -55,6 +57,8 @@ struct CmdArgs {
     int eval_batch_size = 2;
     int save_every = 0;
     float ema_beta = 0.9f;
+    // Q8_0 quantization of the frozen base weights ("" = fp32)
+    string quantize;
     int seed = 42;
     bool synthetic_smoke = false;
     int smoke_steps = 2;
@@ -89,6 +93,9 @@ static void print_usage(const char* prog) {
          << "  --eval_batch_size N      Eval micro-batch size\n"
          << "  --save_every N           Checkpoint interval (steps)\n"
          << "  --ema_beta F             EMA smoothing factor\n"
+         << "  --quantize q8_0          Quantize the frozen base weights to Q8_0\n"
+         << "                           (LoRA params stay fp32; forward uses the\n"
+         << "                           fused int8 kernel, backward reads int8 too)\n"
          << "  --seed N                 Random seed\n"
          << "  --synthetic_smoke        Run a self-contained 2-step smoke train\n"
          << "  --smoke_steps N          Override synthetic smoke steps\n";
@@ -132,6 +139,7 @@ static CmdArgs parse_args(int argc, char** argv) {
         else if (k == "--save_every") args.save_every = stoi(get_val("--save_every"));
         else if (k == "--ema_beta") args.ema_beta = stof(get_val("--ema_beta"));
         else if (k == "--seed") args.seed = stoi(get_val("--seed"));
+        else if (k == "--quantize") args.quantize = get_val("--quantize");
         else if (k == "--synthetic_smoke") args.synthetic_smoke = true;
         else if (k == "--smoke_steps") args.smoke_steps = stoi(get_val("--smoke_steps"));
         else if (k == "--help" || k == "-h") { print_usage(argv[0]); exit(0); }
@@ -334,9 +342,39 @@ int main(int argc, char** argv) {
         }
         cout << "  ✓ Model loaded" << endl;
 
+        // 1b) Optional Q8_0 quantization of the frozen base weights.
+        //
+        // Done after the weights are loaded and BEFORE any LoRA slices are
+        // attached. Only the base weight is quantized; LoRA A/B stay fp32 so
+        // they remain trainable. Requires init_lora_modules() first, because
+        // forward() only routes through the LoRALinear wrappers.
+        model.init_lora_modules();
+        if (!args.quantize.empty()) {
+            const auto t_q0 = chrono::steady_clock::now();
+            int quantized = 0, skipped = 0;
+            for (int li = 0; li < cfg.n_layer; ++li) {
+                auto& blk = model.get_block(li);
+                LoRALinear* layers[4] = {blk.qkv_lin.get(), blk.proj_lin.get(),
+                                         blk.fc_in_lin.get(), blk.fc_out_lin.get()};
+                for (LoRALinear* lin : layers) {
+                    if (!lin || !lin->W()) continue;
+                    if (lin->quantize_base_weight_q8_0(/*allow_skip=*/true)) quantized++;
+                    else skipped++;
+                }
+            }
+            const double qsec =
+                chrono::duration<double>(chrono::steady_clock::now() - t_q0).count();
+            cout << "  [Quant] scheme=" << args.quantize
+                 << " quantized=" << quantized << " skipped=" << skipped
+                 << " (" << fixed << setprecision(2) << qsec << "s)" << endl;
+            if (quantized == 0) {
+                cerr << "[ERROR] --quantize requested but nothing could be quantized" << endl;
+                return 1;
+            }
+        }
+
         // 2) Initialize LoRA and inject / resume
         cout << "\n[2/6] Inject/Resume LoRA..." << endl;
-        model.init_lora_modules();
 
         // Utility: clear existing LoRA slices to avoid duplicate attachments
         auto clear_all_lora = [&]() {
@@ -567,10 +605,18 @@ int main(int argc, char** argv) {
         int64_t total_tokens = 0;
         // Track global RSS peak across steps
         double rss_peak_mb = 0.0;
+        // Wall-clock accounting for the training run
+        const auto run_t0 = chrono::steady_clock::now();
+        double step_ms_best = 1e30;
+        double step_ms_sum = 0.0;
+        int64_t timed_steps = 0;
+        // Phase attribution across the whole run, in milliseconds.
+        double phase_fwd_ms = 0.0, phase_loss_ms = 0.0, phase_bwd_ms = 0.0, phase_opt_ms = 0.0;
 
         for (int step = start_step; step < args.steps; ++step) {
             const int cur_epoch = step / steps_per_epoch + 1;
             const int step_in_epoch = step % steps_per_epoch + 1;
+            const auto step_t0 = chrono::steady_clock::now();
             
             // Gradient accumulation
             double accum_loss = 0.0;
@@ -585,10 +631,13 @@ int main(int argc, char** argv) {
             
             for (int acc = 0; acc < accum; ++acc) {
                 auto batch = train_dataset.next_batch(micro_bs);
+                const auto tp0 = chrono::steady_clock::now();
                 auto logits = model.forward(batch.input_ids, batch.attention_mask);
+                const auto tp1 = chrono::steady_clock::now();
                 rss_fwd_max = std::max(rss_fwd_max, rss_to_mb());
                 auto loss = lm_cross_entropy(logits, batch.labels, -100, "mean");
                 float loss_val = loss->data<float>()[0];
+                const auto tp2 = chrono::steady_clock::now();
                 
                 accum_loss += loss_val;
                 accum_tokens += count_tokens(batch.attention_mask);
@@ -598,8 +647,15 @@ int main(int argc, char** argv) {
                     auto scaled_loss = mul(loss, inv_accum);
                     scaled_loss->backward();
                 }
+                const auto tp3 = chrono::steady_clock::now();
+                // Phase attribution: forward / loss / backward. These are the
+                // three phases whose balance can shift under quantization.
+                phase_fwd_ms += chrono::duration<double, milli>(tp1 - tp0).count();
+                phase_loss_ms += chrono::duration<double, milli>(tp2 - tp1).count();
+                phase_bwd_ms += chrono::duration<double, milli>(tp3 - tp2).count();
                 rss_bwd_max = std::max(rss_bwd_max, rss_to_mb());
             }
+            const auto to0 = chrono::steady_clock::now();
             
             // Gradient clipping
             float grad_norm = clip_and_get_grad_norm(args.clip_grad_norm);
@@ -618,6 +674,7 @@ int main(int argc, char** argv) {
             for (auto& p : trainable) {
                 p->zero_grad();
             }
+            phase_opt_ms += chrono::duration<double, milli>(chrono::steady_clock::now() - to0).count();
             rss_opt_max = std::max(rss_opt_max, rss_to_mb());
             
             // Periodic light cleanup of free blocks (default every 50 steps) to reduce overhead
@@ -638,6 +695,15 @@ int main(int argc, char** argv) {
             float avg_loss = float(accum_loss / double(accum));
             float ppl = perplexity_from_loss(avg_loss);
             total_tokens += accum_tokens;
+
+            // Step timing (skip step 0: it includes lazy allocations)
+            const double step_ms =
+                chrono::duration<double, milli>(chrono::steady_clock::now() - step_t0).count();
+            if (step > start_step) {
+                step_ms_best = std::min(step_ms_best, step_ms);
+                step_ms_sum += step_ms;
+                timed_steps++;
+            }
             
             // EMA
             if (!ema_initialized) {
@@ -658,6 +724,7 @@ int main(int argc, char** argv) {
                      << " | ppl " << setprecision(2) << ppl
                      << " | grad_norm " << setprecision(3) << grad_norm
                      << " | tokens " << accum_tokens
+                     << " | step_ms " << setprecision(1) << step_ms
                      << " | RSS(pre/fwd/bwd/opt/post)="
                      << fixed << setprecision(1)
                      << rss_pre_max << "/" << rss_fwd_max << "/"
@@ -725,8 +792,50 @@ int main(int argc, char** argv) {
         cout << "  Total steps: " << args.steps << endl;
         cout << "  Total tokens: " << total_tokens << endl;
         cout << "  Final EMA loss: " << fixed << setprecision(4) << float(ema_loss) << endl;
+
+        const double run_sec =
+            chrono::duration<double>(chrono::steady_clock::now() - run_t0).count();
+        cout << "  Wall time: " << setprecision(1) << run_sec << " s" << endl;
+        if (timed_steps > 0) {
+            const double avg_ms = step_ms_sum / double(timed_steps);
+            cout << "  Step time: avg " << setprecision(1) << avg_ms
+                 << " ms, best " << step_ms_best << " ms (n=" << timed_steps << ")" << endl;
+            cout << "  Throughput: " << setprecision(1)
+                 << (double(total_tokens) / run_sec) << " tokens/s" << endl;
+            cout << "  Phase split: forward=" << setprecision(1) << phase_fwd_ms
+                 << " ms  loss=" << phase_loss_ms
+                 << " ms  backward=" << phase_bwd_ms
+                 << " ms  optimizer=" << phase_opt_ms << " ms" << endl;
+            const double phase_tot = phase_fwd_ms + phase_loss_ms + phase_bwd_ms + phase_opt_ms;
+            if (phase_tot > 0) {
+                cout << "  Phase share: fwd=" << setprecision(1)
+                     << (100.0 * phase_fwd_ms / phase_tot) << "%  bwd="
+                     << (100.0 * phase_bwd_ms / phase_tot) << "%  opt="
+                     << (100.0 * phase_opt_ms / phase_tot) << "%" << endl;
+            }
+            cout << "  Peak RSS: " << setprecision(1) << rss_peak_mb << " MB" << endl;
+            // Machine-readable summary for automated comparison.
+            // Every float is formatted explicitly: the stream's precision flag
+            // would otherwise leak from one field into the next.
+            auto f1 = [](double v) { std::ostringstream s; s << std::fixed << std::setprecision(1) << v; return s.str(); };
+            auto f2 = [](double v) { std::ostringstream s; s << std::fixed << std::setprecision(2) << v; return s.str(); };
+            auto f6 = [](double v) { std::ostringstream s; s << std::fixed << std::setprecision(6) << v; return s.str(); };
+            cout << "TRAIN_SUMMARY {\"quantize\":\"" << args.quantize
+                 << "\",\"steps\":" << args.steps
+                 << ",\"tokens\":" << total_tokens
+                 << ",\"ema_loss\":" << f6(double(ema_loss))
+                 << ",\"wall_s\":" << f2(run_sec)
+                 << ",\"avg_step_ms\":" << f2(avg_ms)
+                 << ",\"best_step_ms\":" << f2(step_ms_best)
+                 << ",\"tokens_per_s\":" << f2(double(total_tokens) / run_sec)
+                 << ",\"peak_rss_mb\":" << f1(rss_peak_mb)
+                 << ",\"seq_len\":" << args.seq_len
+                 << ",\"batch_size\":" << args.batch_size
+                 << ",\"grad_accum\":" << args.grad_accum_steps
+                 << ",\"rank\":" << args.rank << "}" << endl;
+        }
         cout << "========================================\n" << endl;
-        
+
         return 0;
 
     } catch (const exception& e) {

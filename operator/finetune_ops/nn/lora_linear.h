@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "../core/quant_ops.h"
 #include "../core/tensor.h"
 #include <cstdint>
 #include <memory>
@@ -37,10 +38,26 @@ struct LoRASlice {
 class LoRALinear {
 public:
     /**
+     * @brief Quantize the frozen base weight to Q8_0 (llama.cpp compatible).
+     *
+     * @param allow_skip  when true, layers whose in_features is not a multiple
+     *                    of 32 (Q8_0's block size) are left UNQUANTIZED and a
+     *                    warning is printed instead of throwing. Set this for
+     *                    demos on real checkpoints, where such layers exist.
+     * @return true if the layer is quantized, false if it was skipped.
+     * @throws std::runtime_error only when allow_skip is false and the shape
+     *         is unsupported.
+     */
+    bool quantize_base_weight_q8_0(bool allow_skip = false);
+
+
+    
+    /**
      * @brief Constructor (references base weights, no copy)
      */
     LoRALinear(const TensorPtr& W_base, const TensorPtr& b_base = nullptr)
         : W_(W_base), b_(b_base), merged_(false) {}
+    
     
     /**
      * @brief Attach one LoRA slice (call multiple times, e.g., qkv has 3)
@@ -84,6 +101,10 @@ public:
     const TensorPtr& b() const { return b_; }
     const std::vector<LoRASlice>& slices() const { return slices_; }
     bool is_merged() const { return merged_; }
+    //Q: Q8_0 state accessors
+    bool is_quantized() const { return is_quantized_; }
+    const std::vector<block_q8_0>& quantized_weight() const { return quantized_weight_; }
+    int64_t quantized_numel() const { return quantized_numel_; }
 
     // For frozen disk-offload owners only. nullptr releases residency; forward
     // requires rebinding. Adapter tensors and mixed-precision paths are unchanged.
@@ -100,6 +121,10 @@ private:
     bool merged_;
     std::vector<uint8_t> merge_backup_;
     std::string debug_name_;
+    // === 新增：Q8_0 量化相关成员 ===
+    std::vector<block_q8_0> quantized_weight_;   // 量化后的 block 数组
+    int64_t quantized_numel_ = 0;                // 原始元素个数（用于反量化）
+    bool is_quantized_ = false;                  // 标记是否使用量化基础权重
 };
 
 }  // namespace ops
