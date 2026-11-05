@@ -134,6 +134,12 @@ public:
      */
     GPT2BlockWeights& get_block(int i) { return blocks_[i]; }
     const GPT2BlockWeights& get_block(int i) const { return blocks_[i]; }
+
+    // Read-only weight accessors, used when serializing a quantized checkpoint.
+    const TensorPtr& wte() const { return wte_weight_; }
+    const TensorPtr& wpe() const { return wpe_weight_; }
+    const TensorPtr& ln_f_weight() const { return ln_f_weight_; }
+    const TensorPtr& ln_f_bias() const { return ln_f_bias_; }
     
     /**
      * @brief Collect all LoRA trainable parameters

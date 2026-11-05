@@ -101,6 +101,7 @@ set(FINETUNE_SOURCES
     finetune_ops/core/ops.cpp
     finetune_ops/core/autograd_engine.cpp
     finetune_ops/core/backward_functions.cpp
+    finetune_ops/core/quant_io.cpp
     finetune_ops/core/logger.cpp
     finetune_ops/core/memory_manager.cpp
     finetune_ops/core/step_arena.cpp
