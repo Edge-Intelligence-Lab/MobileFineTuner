@@ -384,7 +384,25 @@ bool LoRALinear::quantize_base_weight_q8_0(bool allow_skip) {
     quantize_row_q8_0_ref(w_t.data(), quantized_weight_.data(), static_cast<int>(n));
 
     is_quantized_ = true;
+    q8_k_ = K;
+    q8_m_ = M;
     return true;
+}
+
+void LoRALinear::adopt_quantized_weight(int64_t K, int64_t M,
+                                        std::vector<block_q8_0> blocks) {
+    if (K <= 0 || M <= 0 || K % Q8_0_BLOCK_SIZE != 0) {
+        throw std::runtime_error(
+            "adopt_quantized_weight: bad shape (K must be a positive multiple of 32)");
+    }
+    if (static_cast<int64_t>(blocks.size()) != (K / Q8_0_BLOCK_SIZE) * M) {
+        throw std::runtime_error("adopt_quantized_weight: block count does not match K*M/32");
+    }
+    quantized_weight_ = std::move(blocks);
+    quantized_numel_ = K * M;
+    q8_k_ = K;
+    q8_m_ = M;
+    is_quantized_ = true;
 }
 
 void LoRALinear::attach_lora(const TensorPtr& A, const TensorPtr& B,
@@ -400,7 +418,8 @@ void LoRALinear::attach_lora(const TensorPtr& A, const TensorPtr& B,
     
     int64_t out_cols = cols;
     if (out_cols <= 0) {
-        int64_t base_in_dim = W_->shape().empty() ? A->shape()[0] : W_->shape()[0];
+        int64_t base_in_dim = W_ ? (W_->shape().empty() ? A->shape()[0] : W_->shape()[0])
+                                 : (q8_k_ > 0 ? q8_k_ : A->shape()[0]);
         out_cols = infer_effective_lora_shape(A, B, base_in_dim).out_dim;
     }
     
@@ -480,15 +499,14 @@ TensorPtr LoRALinear::forward(const TensorPtr& x) const {
     // stays on the fp32 path -- quantize_base_weight_q8_0() refuses to mark such
     // a layer as quantized (see its allow_skip handling).
     const bool can_use_fused =
-        is_quantized_ && (W_->ndim() == 2) &&
-        (W_->shape()[0] % Q8_0_BLOCK_SIZE == 0);
+        is_quantized_ && q8_k_ > 0 && (q8_k_ % Q8_0_BLOCK_SIZE == 0);
 
     TensorPtr y;
     if (can_use_fused) {
         // W_ is stored [K, M]; the Q8_0 buffer is the transposed [M, K] layout,
         // so y2d[i][j] = dot(x_row_i, q8_row_j).
-        const int64_t k = W_->shape()[0];   // in_features
-        const int64_t m = W_->shape()[1];   // out_features
+        const int64_t k = q8_k_;   // in_features
+        const int64_t m = q8_m_;   // out_features
 
         const auto& x_shape = x->shape();
         const int64_t n = x->numel() / k;
@@ -593,6 +611,11 @@ TensorPtr LoRALinear::forward(const TensorPtr& x) const {
         y = reshape(y2d, out_shape);
     } else {
         // Unquantized base weight: the generic matmul path.
+        if (!W_eff) {
+            throw std::runtime_error(
+                "LoRALinear::forward: fp32 base weight absent (loaded from an int8 "
+                "checkpoint); only the quantized path is available for this layer");
+        }
         log_shape("base matmul", x, W_eff);
         try {
             y = matmul(x, W_eff);
@@ -609,8 +632,8 @@ TensorPtr LoRALinear::forward(const TensorPtr& x) const {
     
     // LoRA delta: Σ scale * (x @ A @ B)
     if (!slices_.empty() && !merged_) {
-        const int64_t w0 = W_->shape()[0];
-        const int64_t w1 = W_->shape()[1];
+        const int64_t w0 = is_quantized_ ? q8_k_ : W_->shape()[0];
+        const int64_t w1 = is_quantized_ ? q8_m_ : W_->shape()[1];
         int64_t in_dim_x = x->shape()[2];
         // Handle W_ shaped as either [out,in] or [in,out]
         int64_t out_dim = (w1 == in_dim_x) ? w0 : (w0 == in_dim_x ? w1 : w0);
@@ -697,6 +720,11 @@ TensorPtr LoRALinear::forward(const TensorPtr& x) const {
 
 void LoRALinear::merge_to_base() {
     if (merged_ || slices_.empty()) return;
+    if (!W_) {
+        throw std::runtime_error(
+            "LoRALinear::merge_to_base: no fp32 base weight (loaded from an int8 "
+            "checkpoint); dequantize the layer first");
+    }
 
     const size_t nbytes = tensor_nbytes(W_);
     merge_backup_.resize(nbytes);
