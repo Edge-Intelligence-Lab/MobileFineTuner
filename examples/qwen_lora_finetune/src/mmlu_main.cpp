@@ -65,6 +65,10 @@ struct Args {
     std::string log_file = "";  // optional log file path
     bool save_weights = true;   // whether to save weights
     std::string base_weight_storage = "auto";
+    bool activation_checkpointing = false;
+    bool memory_efficient_attention = false;
+    std::string offload_dir;
+    int offload_resident_mb = 1536;
 };
 
 // Simple logger that mirrors stdout to file when enabled
@@ -132,6 +136,10 @@ static void parse_args(int argc, char** argv, Args& args) {
         else if (k == "--log_file") args.log_file = get_str();
         else if (k == "--no_save") args.save_weights = false;
         else if (k == "--base_weight_storage") args.base_weight_storage = get_str();
+        else if (k == "--activation_checkpointing") args.activation_checkpointing = true;
+        else if (k == "--memory_efficient_attention") args.memory_efficient_attention = true;
+        else if (k == "--offload_dir") args.offload_dir = get_str();
+        else if (k == "--offload_resident_mb") args.offload_resident_mb = get_int();
     }
 }
 
@@ -209,6 +217,10 @@ int main(int argc, char** argv) {
     log << "================================================\n\n";
     
     try {
+        if ((args.activation_checkpointing || !args.offload_dir.empty()) && args.lora_dropout != 0)
+            throw std::runtime_error("memory training examples require --lora_dropout 0");
+        if (!args.offload_dir.empty() && (args.base_weight_storage != "fp32" || args.offload_resident_mb <= 0))
+            throw std::runtime_error("offload requires --base_weight_storage fp32 and a positive --offload_resident_mb");
         double init_rss = get_rss_mb();
         log << "[Init] RSS: " << std::fixed << std::setprecision(1) << init_rss << " MB\n";
         
@@ -247,6 +259,15 @@ int main(int argc, char** argv) {
         log << "[4/6] Initializing LoRA (q/v only)...\n";
         model.init_lora(args.lora_r, args.lora_alpha, args.lora_dropout, args.qv_only, args.seed);
         model.freeze_base();
+        model.set_memory_efficient_attention(args.memory_efficient_attention);
+        model.set_activation_checkpointing(args.activation_checkpointing);
+        if (!args.offload_dir.empty()) {
+            tensors.clear(); // Release loader aliases before relinquishing model ownership.
+            sharding::ShardConfig offload;
+            offload.offload_dir = args.offload_dir;
+            offload.max_resident_bytes = static_cast<size_t>(args.offload_resident_mb) * 1024 * 1024;
+            model.enable_parameter_sharding(offload);
+        }
         auto lora_params = model.get_lora_parameters();
         log << "  Total LoRA parameters: " << lora_params.size() << "\n";
         
@@ -442,3 +463,4 @@ int main(int argc, char** argv) {
     
     return 0;
 }
+

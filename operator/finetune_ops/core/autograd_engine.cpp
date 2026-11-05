@@ -31,6 +31,10 @@ NodePtr Engine::get_node(const TensorPtr& tensor) {
 NodePtr Engine::register_node(const TensorPtr& output,
                               const std::vector<TensorPtr>& inputs,
                               BackwardFunctionPtr backward_fn) {
+    if (capture_ && output && backward_fn) {
+        for (const auto& input : inputs) capture_->observe_input(input);
+        capture_->produced[output.get()] = output;
+    }
     if (!enabled_ || !output || !backward_fn) {
         return nullptr;
     }
@@ -143,6 +147,12 @@ void Engine::accumulate_grad(const TensorPtr& tensor, const TensorPtr& grad) {
 
 void Engine::run_backward(const std::vector<TensorPtr>& outputs,
                          const std::vector<TensorPtr>& output_grads) {
+    run_backward_impl(outputs, output_grads, nullptr);
+}
+
+void Engine::run_backward_impl(const std::vector<TensorPtr>& outputs,
+                              const std::vector<TensorPtr>& output_grads,
+                              Gradients* collected) {
     if (!enabled_) return;
 
     // Prepare root nodes and gradients
@@ -150,7 +160,8 @@ void Engine::run_backward(const std::vector<TensorPtr>& outputs,
     for (size_t i = 0; i < outputs.size(); ++i) {
         if (!outputs[i] || !outputs[i]->requires_grad()) continue;
         
-        NodePtr node = outputs[i]->grad_node_;
+        NodePtr node = collected ? get_node(outputs[i]) : outputs[i]->grad_node_;
+        if (collected) tensor_registry_[outputs[i].get()] = outputs[i];
         if (!node) {
             node = get_node(outputs[i]);
             outputs[i]->grad_node_ = node;
@@ -193,8 +204,17 @@ void Engine::run_backward(const std::vector<TensorPtr>& outputs,
         std::vector<TensorPtr> input_grads;
         bool used_legacy = false;
         if (node->backward_fn) {
-            input_grads = node->backward_fn->apply(node_grad);
-        } else if (node->tensor->grad_fn_) {
+            // Nested VJPs are first-order only; do not build a graph of gradients.
+            const bool previous_enabled = enabled_;
+            if (collected) enabled_ = false;
+            try {
+                input_grads = node->backward_fn->apply(node_grad);
+            } catch (...) {
+                if (collected) enabled_ = previous_enabled;
+                throw;
+            }
+            if (collected) enabled_ = previous_enabled;
+        } else if (!collected && node->tensor->grad_fn_) {
             used_legacy = true;
             input_grads = node->tensor->grad_fn_(node_grad);
         } else {
@@ -206,7 +226,8 @@ void Engine::run_backward(const std::vector<TensorPtr>& outputs,
                 if (!edge || !edge->input_node || !edge->input_node->tensor) continue;
                 int idx = edge->input_idx;
                 if (idx >= 0 && idx < static_cast<int>(input_grads.size()) && input_grads[idx]) {
-                    accumulate_grad(edge->input_node->tensor, input_grads[idx]);
+                    accumulate_grad(edge->input_node->tensor,
+                                    collected ? input_grads[idx]->clone() : input_grads[idx]);
                 }
             }
         }
@@ -224,6 +245,12 @@ void Engine::run_backward(const std::vector<TensorPtr>& outputs,
     #ifdef AUTOGRAD_DEBUG
     // Debug only
     #endif
+
+    if (collected) {
+        *collected = std::move(pending_grads_);
+        clear_graph();
+        return;
+    }
 
     for (const auto& [tensor_ptr, grad] : pending_grads_) {
         // Find the tensor shared_ptr from registry
@@ -276,7 +303,8 @@ void Engine::clear_graph() {
     // First break bi-directional references between Tensor and Node to avoid cross-step memory retention
     for (auto &kv : tensor_registry_) {
         TensorPtr t = kv.second;
-        if (t) {
+        auto node = tensor_to_node_.find(kv.first);
+        if (t && node != tensor_to_node_.end() && t->grad_node_ == node->second) {
             t->grad_node_.reset();
         }
     }
@@ -284,6 +312,57 @@ void Engine::clear_graph() {
     tensor_to_node_.clear();
     tensor_registry_.clear();
     pending_grads_.clear();
+}
+
+void Engine::DependencyCapture::observe_input(const TensorPtr& tensor) {
+    if (!tensor || !tensor->requires_grad()) return;
+    auto it = produced.find(tensor.get());
+    // Weak references avoid retaining activations, and handle allocator address reuse.
+    if (it == produced.end() || it->second.expired()) inputs[tensor.get()] = tensor;
+}
+
+TensorPtr Engine::capture_dependencies(const std::function<TensorPtr()>& forward,
+                                      std::vector<TensorPtr>& dependencies) {
+    DependencyCapture capture;
+    auto* previous_capture = capture_;
+    const bool previous_enabled = enabled_;
+    capture_ = &capture;
+    enabled_ = false;
+    try {
+        auto output = forward();
+        capture.observe_input(output); // Identity or a directly returned captured tensor.
+        dependencies.clear();
+        for (const auto& entry : capture.inputs) dependencies.push_back(entry.second);
+        capture_ = previous_capture;
+        enabled_ = previous_enabled;
+        return output;
+    } catch (...) {
+        capture_ = previous_capture;
+        enabled_ = previous_enabled;
+        throw;
+    }
+}
+
+Engine::EngineState Engine::take_state() {
+    EngineState state;
+    state.nodes.swap(tensor_to_node_);
+    state.tensors.swap(tensor_registry_);
+    state.gradients.swap(pending_grads_);
+    return state;
+}
+
+void Engine::restore_state(EngineState&& state) noexcept {
+    clear_graph();
+    tensor_to_node_.swap(state.nodes);
+    tensor_registry_.swap(state.tensors);
+    pending_grads_.swap(state.gradients);
+    for (const auto& entry : tensor_to_node_) entry.second->tensor->grad_node_ = entry.second;
+}
+
+Engine::Gradients Engine::backward_gradients(const TensorPtr& output, const TensorPtr& grad) {
+    Gradients gradients;
+    run_backward_impl({output}, {grad->clone()}, &gradients);
+    return gradients;
 }
 
 } // namespace autograd

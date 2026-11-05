@@ -6,6 +6,8 @@
 #include "qwen_model.h"
 #include "../core/ops.h"
 #include "../core/utils.h"
+#include "../core/memory_efficient_attention.h"
+#include "../core/checkpoint.h"
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -103,6 +105,7 @@ QwenModel::QwenModel(const QwenConfig& cfg) : config_(cfg) {
 
 // -------------- Weight dispatch --------------
 void QwenModel::assign_weight(const std::string& key, const TensorPtr& tensor) {
+    if (offload_) throw std::logic_error("load weights before enabling parameter offload");
     if (key == "embed_tokens.weight") embed_tokens_ = tensor;
     else if (key == "final_norm.weight") final_norm_weight_ = tensor;
     else {
@@ -131,6 +134,7 @@ void QwenModel::assign_weight(const std::string& key, const TensorPtr& tensor) {
 
 // -------------- LoRA --------------
 void QwenModel::init_lora(int rank, float alpha, float dropout [[maybe_unused]], bool qv_only, uint64_t seed) {
+    if (offload_) throw std::logic_error("initialize LoRA before enabling parameter offload");
     float scale = alpha / rank;
     std::mt19937 rng(static_cast<uint32_t>(seed));
     std::uniform_real_distribution<float> init_dist(-0.01f, 0.01f);
@@ -205,6 +209,7 @@ std::vector<TensorPtr> QwenModel::get_lora_parameters() const {
 }
 
 std::vector<TensorPtr> QwenModel::parameters() const {
+    if (offload_) throw std::logic_error("use get_lora_parameters after enabling frozen base offload");
     std::vector<TensorPtr> params;
     params.reserve(2 + static_cast<size_t>(config_.num_hidden_layers) * 12);
     params.push_back(embed_tokens_);
@@ -308,6 +313,13 @@ TensorPtr QwenModel::attention(const TensorPtr& x, QwenBlock& blk,
     q = apply_rope(q, static_cast<int>(S), static_cast<int>(Hd), config_.rope_theta);
     k = apply_rope(k, static_cast<int>(S), static_cast<int>(Hd), config_.rope_theta);
 
+    TensorPtr ctx;
+    if (memory_efficient_attention_) {
+        MemoryEfficientAttentionConfig cfg;
+        cfg.use_causal_mask = false;
+        cfg.scale = 1.0f / std::sqrt(static_cast<float>(Hd));
+        ctx = memory_efficient_attention(q, k, v, causal_mask, pad_mask, cfg);
+    } else {
     auto k_t = transpose(k, 2, 3); // [B,H,Hd,S]
     auto scores = matmul(q, k_t);  // [B,H,S,S]
     scores = mul(scores, 1.0f / std::sqrt(static_cast<float>(Hd)));
@@ -315,7 +327,8 @@ TensorPtr QwenModel::attention(const TensorPtr& x, QwenBlock& blk,
     if (causal_mask) scores = add(scores, causal_mask);
     if (pad_mask) scores = add(scores, pad_mask);
     auto probs = softmax(scores, -1);
-    auto ctx = matmul(probs, v);  // [B,H,S,Hd]
+    ctx = matmul(probs, v);  // [B,H,S,Hd]
+    }
     ctx = permute(ctx, {0, 2, 1, 3});
     ctx = reshape(ctx, {B, S, C});
 
@@ -333,7 +346,9 @@ TensorPtr QwenModel::mlp(const TensorPtr& x, QwenBlock& blk) {
 
 // -------------- 前向 --------------
 TensorPtr QwenModel::forward_hidden(const TensorPtr& input_ids, const TensorPtr& attention_mask) {
+    if (offload_) offload_->load(0);
     auto x = embedding_lookup(embed_tokens_, input_ids); // [B,S,H]
+    if (offload_) offload_->offload_all();
 
     TensorPtr pad_mask = nullptr;
     if (attention_mask) {
@@ -366,7 +381,15 @@ TensorPtr QwenModel::forward_hidden(const TensorPtr& input_ids, const TensorPtr&
     auto causal_mask = build_causal_mask(x->shape()[1]);
 
     for (int i = 0; i < config_.num_hidden_layers; ++i) {
+        auto block_forward = [this,i,causal_mask,pad_mask,debug,tensor_stats](const TensorPtr& input) {
+        if (offload_) offload_->load(static_cast<size_t>(i)+2);
         auto& blk = layers_[i];
+        OffloadLinearLease lease{bool(offload_)};
+        lease.bind(blk.q_lin.get(),blk.q_proj_weight,blk.q_proj_bias);
+        lease.bind(blk.k_lin.get(),blk.k_proj_weight,blk.k_proj_bias);
+        lease.bind(blk.v_lin.get(),blk.v_proj_weight,blk.v_proj_bias);
+        lease.bind(blk.o_lin.get(),blk.o_proj_weight);
+        auto x = input;
         auto normed = rms_norm_affine(x, blk.input_norm_weight, config_.rms_norm_eps);
         auto attn_out = attention(normed, blk, causal_mask, pad_mask, x->shape()[1]);
         x = add(x, attn_out);
@@ -380,17 +403,53 @@ TensorPtr QwenModel::forward_hidden(const TensorPtr& input_ids, const TensorPtr&
             tensor_stats(normed2, "ln2");
             tensor_stats(mlp_out, "mlp_out");
         }
+        return x;
+        };
+        std::vector<TensorPtr> captures;
+        for (auto* lin : {layers_[i].q_lin.get(),layers_[i].k_lin.get(),layers_[i].v_lin.get(),layers_[i].o_lin.get()})
+            if(lin) { auto p=lin->trainable_parameters();captures.insert(captures.end(),p.begin(),p.end()); }
+        x = activation_checkpointing_ ? checkpoint(block_forward,x,captures) : block_forward(x);
+        if (offload_) offload_->offload_all();
     }
+    if (offload_) offload_->load(1);
     x = rms_norm_affine(x, final_norm_weight_, config_.rms_norm_eps);
+    if (offload_) offload_->offload_all();
     return x;
 }
 
 TensorPtr QwenModel::lm_head(const TensorPtr& hidden) {
-    return matmul_rhs_T(hidden, embed_tokens_); // [B,S,H] @ [V,H]^T -> [B,S,V]
+    if (offload_) offload_->load(0);
+    auto output = matmul_rhs_T(hidden, embed_tokens_);
+    if (offload_) offload_->offload_all();
+    return output;
 }
 
 TensorPtr QwenModel::forward(const TensorPtr& input_ids, const TensorPtr& attention_mask) {
     return lm_head(forward_hidden(input_ids, attention_mask));
+}
+
+void QwenModel::set_activation_checkpointing(bool enabled) {
+#ifndef USE_NEW_AUTOGRAD_ENGINE
+    if (enabled) throw std::logic_error("activation checkpointing requires the new autograd engine");
+#endif
+    activation_checkpointing_ = enabled;
+}
+
+void QwenModel::enable_parameter_sharding(const sharding::ShardConfig& config) {
+    if (offload_) throw std::logic_error("parameter offload already enabled");
+    std::vector<FrozenModelOffload::Group> groups{{&embed_tokens_},{&final_norm_weight_}};
+    for(auto& b:layers_) {
+        if(!b.lora_initialized) throw std::logic_error("initialize LoRA before offload");
+        for(auto* lin:{b.q_lin.get(),b.k_lin.get(),b.v_lin.get(),b.o_lin.get()})
+            if(lin && lin->is_merged()) throw std::logic_error("unmerge LoRA before offload");
+        groups.push_back({&b.input_norm_weight,&b.post_norm_weight,&b.q_proj_weight,&b.q_proj_bias,
+            &b.k_proj_weight,&b.k_proj_bias,&b.v_proj_weight,&b.v_proj_bias,&b.o_proj_weight,
+            &b.gate_proj_weight,&b.up_proj_weight,&b.down_proj_weight});
+    }
+    offload_=std::make_unique<FrozenModelOffload>(config,groups);
+    for(auto& b:layers_) for(auto* lin:{b.q_lin.get(),b.k_lin.get(),b.v_lin.get(),b.o_lin.get()})
+        if(lin) lin->set_base_weights(nullptr);
+    offload_->offload_all();
 }
 
 } // namespace ops

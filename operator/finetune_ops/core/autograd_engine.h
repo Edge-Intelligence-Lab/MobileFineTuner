@@ -123,6 +123,21 @@ public:
     void set_enabled(bool enabled) { enabled_ = enabled; }
     bool is_enabled() const { return enabled_; }
 
+    using Gradients = std::unordered_map<const Tensor*, TensorPtr>;
+    struct EngineState {
+        std::unordered_map<const Tensor*, NodePtr> nodes;
+        std::unordered_map<const Tensor*, TensorPtr> tensors;
+        Gradients gradients;
+    };
+
+    // Internal checkpoint support. States must be restored in LIFO order.
+    EngineState take_state();
+    void restore_state(EngineState&& state) noexcept;
+    TensorPtr capture_dependencies(const std::function<TensorPtr()>& forward,
+                                   std::vector<TensorPtr>& dependencies);
+    // Returns independent boundary gradients without modifying Tensor::grad().
+    Gradients backward_gradients(const TensorPtr& output, const TensorPtr& grad);
+
 private:
     Engine() : enabled_(true) {}
     
@@ -136,10 +151,20 @@ private:
     std::unordered_map<const Tensor*, TensorPtr> pending_grads_;
     
     bool enabled_;
+
+    struct DependencyCapture {
+        std::unordered_map<const Tensor*, std::weak_ptr<Tensor>> produced;
+        std::unordered_map<const Tensor*, TensorPtr> inputs;
+        void observe_input(const TensorPtr& tensor);
+    };
+    DependencyCapture* capture_ = nullptr;
     
     // Internal helpers
     std::vector<NodePtr> topological_sort(const std::vector<NodePtr>& roots);
     void accumulate_grad(const TensorPtr& tensor, const TensorPtr& grad);
+    void run_backward_impl(const std::vector<TensorPtr>& outputs,
+                           const std::vector<TensorPtr>& output_grads,
+                           Gradients* collected);
 };
 
 } // namespace autograd

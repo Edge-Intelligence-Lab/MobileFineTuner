@@ -9,6 +9,7 @@
 
 #include "../core/tensor.h"
 #include "../nn/lora_linear.h"
+#include "frozen_model_offload.h"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -78,6 +79,11 @@ public:
     std::vector<TensorPtr> parameters() const;
     void freeze_base();
 
+    void set_memory_efficient_attention(bool enabled) { memory_efficient_attention_ = enabled; }
+    void set_activation_checkpointing(bool enabled);
+    void enable_parameter_sharding(const sharding::ShardConfig& config);
+    sharding::ShardStats sharding_stats() const { return offload_ ? offload_->stats() : sharding::ShardStats{}; }
+
     void assign_weight(const std::string& key, const TensorPtr& tensor);
     const QwenConfig& config() const { return config_; }
 
@@ -87,6 +93,9 @@ private:
     TensorPtr final_norm_weight_; // [hidden]
 
     std::vector<QwenBlock> layers_;
+    bool memory_efficient_attention_ = false;
+    bool activation_checkpointing_ = false;
+    std::unique_ptr<FrozenModelOffload> offload_;
 
     TensorPtr embedding_lookup(const TensorPtr& weight, const TensorPtr& indices);
     TensorPtr build_causal_mask(int seq_len);

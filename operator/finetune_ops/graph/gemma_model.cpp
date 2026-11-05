@@ -1,6 +1,8 @@
 #include "gemma_model.h"
 
 #include "../core/ops.h"
+#include "../core/memory_efficient_attention.h"
+#include "../core/checkpoint.h"
 
 #include <algorithm>
 #include <cmath>
@@ -484,6 +486,13 @@ TensorPtr GemmaModel::apply_attention(const TensorPtr& x,
         dump_tensor(v_full, "v_full_l" + std::to_string(dbg_layer));
     }
 
+    TensorPtr context;
+    if (memory_efficient_attention_) {
+        MemoryEfficientAttentionConfig cfg;
+        cfg.use_causal_mask = false;
+        cfg.scale = std::pow(config_.query_pre_attn_scalar, -0.5f);
+        context = memory_efficient_attention(q, k_full, v_full, base_mask, pad_mask, cfg);
+    } else {
     auto k_t = transpose(k_full, 2, 3);  // [B,n_head,Hd,S]
     auto scores = matmul(q, k_t);        // [B,n_head,S,S]
 
@@ -502,7 +511,8 @@ TensorPtr GemmaModel::apply_attention(const TensorPtr& x,
         dump_tensor(scores, "attn_scores_l" + std::to_string(dbg_layer));
         dump_tensor(probs, "attn_probs_l" + std::to_string(dbg_layer));
     }
-    auto context = matmul(probs, v_full);  // [B,n_head,S,Hd]
+    context = matmul(probs, v_full);  // [B,n_head,S,Hd]
+    }
     context = permute(context, {0, 2, 1, 3});
     int64_t attn_dim = block.q_proj_weight->shape()[1];
     context = reshape(context, {B, S, attn_dim});
@@ -576,9 +586,19 @@ TensorPtr GemmaModel::forward_block(const TensorPtr& input,
     return hidden_states;
 }
 
+void GemmaModel::set_memory_efficient_attention(bool enabled) {
+    if (enabled && (config_.attention_dropout != 0 || config_.attn_logit_softcapping != 0))
+        throw std::invalid_argument("streaming attention requires zero attention dropout and softcap");
+    memory_efficient_attention_ = enabled;
+}
+
 TensorPtr GemmaModel::forward(const TensorPtr& input_ids,
                               const TensorPtr& attention_mask) {
+    if ((activation_checkpointing_ || offload_ || memory_efficient_attention_) && (debug_.enabled || debug_.numeric_enabled))
+        throw std::logic_error("disable debug/perturbation when using memory optimizations");
+    if (offload_) offload_->load(0);
     auto hidden_states = embedding_lookup(input_ids);
+    if (offload_) offload_->offload_all();
     if (debug_.enabled) {
         dump_tensor(hidden_states, "hidden_states_emb");
     }
@@ -602,7 +622,26 @@ TensorPtr GemmaModel::forward(const TensorPtr& input_ids,
         float rope_theta = is_sliding ? config_.rope_local_base_freq : config_.rope_theta;
         const auto& mask = is_sliding ? sliding_mask : causal_mask;
         if (!debug_.enabled) {
-            hidden_states = forward_block(hidden_states, blocks_[i], pos.cos, pos.sin, pad_mask, mask, rope_theta);
+            auto block_forward = [this,i,pos,pad_mask,mask,rope_theta](const TensorPtr& input) {
+                if(offload_) offload_->load(static_cast<size_t>(i)+2);
+                auto& b=blocks_[i];
+                OffloadLinearLease lease{bool(offload_)};
+                lease.bind(b.q_proj_lora.get(),b.q_proj_weight);
+                lease.bind(b.k_proj_lora.get(),b.k_proj_weight);
+                lease.bind(b.v_proj_lora.get(),b.v_proj_weight);
+                lease.bind(b.o_proj_lora.get(),b.o_proj_weight);
+                lease.bind(b.gate_proj_lora.get(),b.gate_proj_weight);
+                lease.bind(b.up_proj_lora.get(),b.up_proj_weight);
+                lease.bind(b.down_proj_lora.get(),b.down_proj_weight);
+                return forward_block(input,b,pos.cos,pos.sin,pad_mask,mask,rope_theta);
+            };
+            std::vector<TensorPtr> captures;
+            const auto& b=blocks_[i];
+            for(auto* lin:{b.q_proj_lora.get(),b.k_proj_lora.get(),b.v_proj_lora.get(),b.o_proj_lora.get(),
+                          b.gate_proj_lora.get(),b.up_proj_lora.get(),b.down_proj_lora.get()})
+                if(lin) {auto p=lin->trainable_parameters();captures.insert(captures.end(),p.begin(),p.end());}
+            hidden_states = activation_checkpointing_ ? checkpoint(block_forward,hidden_states,captures) : block_forward(hidden_states);
+            if(offload_) offload_->offload_all();
             continue;
         }
 
@@ -637,8 +676,10 @@ TensorPtr GemmaModel::forward(const TensorPtr& input_ids,
         hidden_states = add(residual, mlp_out);
     }
 
+    if(offload_) offload_->load(1);
     hidden_states = rms_norm(hidden_states, norm_weight_, config_.rms_norm_eps);
     auto logits = matmul(hidden_states, lm_head_weight_);
+    if(offload_) offload_->offload_all();
     if (debug_.enabled) {
         dump_tensor(logits, "logits");
     }
@@ -646,6 +687,7 @@ TensorPtr GemmaModel::forward(const TensorPtr& input_ids,
 }
 
 void GemmaModel::assign_weight(const std::string& key, const TensorPtr& tensor) {
+    if (offload_) throw std::logic_error("load weights before enabling parameter offload");
     if (key == "embed_tokens.weight") {
         embed_weight_ = tensor;
         if (!lm_head_initialized_) {
@@ -709,6 +751,7 @@ const GemmaBlockWeights& GemmaModel::get_block(int i) const {
 }
 
 std::vector<TensorPtr> GemmaModel::parameters() const {
+    if (offload_) throw std::logic_error("use get_lora_parameters after enabling frozen base offload");
     std::vector<TensorPtr> params;
     params.reserve(3 + static_cast<size_t>(config_.num_hidden_layers) * 13);
     params.push_back(embed_weight_);
@@ -789,6 +832,7 @@ void GemmaModel::dump_tensor(const TensorPtr& t, const std::string& name) const 
 }
 
 void GemmaModel::init_lora_modules() {
+    if(offload_) throw std::logic_error("initialize LoRA before enabling parameter offload");
     for (auto& block : blocks_) {
         if (block.lora_initialized) continue;
 
@@ -825,6 +869,7 @@ std::vector<TensorPtr> GemmaModel::get_lora_parameters() const {
 }
 
 void GemmaModel::merge_lora() {
+    if(offload_) throw std::logic_error("merging is unsupported while frozen base offload is enabled");
     for (auto& block : blocks_) {
         if (!block.lora_initialized) continue;
         if (block.q_proj_lora) block.q_proj_lora->merge_to_base();
@@ -838,6 +883,7 @@ void GemmaModel::merge_lora() {
 }
 
 void GemmaModel::unmerge_lora() {
+    if(offload_) throw std::logic_error("unmerging is unsupported while frozen base offload is enabled");
     for (auto& block : blocks_) {
         if (!block.lora_initialized) continue;
         if (block.q_proj_lora) block.q_proj_lora->unmerge_from_base();
@@ -855,6 +901,35 @@ void GemmaModel::request_embedding_dump(int step, const std::string& output_dir)
     dump_request_.target_step = step;
     dump_request_.output_dir = output_dir;
     dump_request_.fulfilled = false;
+}
+
+void GemmaModel::set_activation_checkpointing(bool enabled) {
+#ifndef USE_NEW_AUTOGRAD_ENGINE
+    if(enabled) throw std::logic_error("activation checkpointing requires the new autograd engine");
+#endif
+    if(enabled && config_.attention_dropout != 0)
+        throw std::invalid_argument("checkpointing requires deterministic regions (dropout=0)");
+    activation_checkpointing_ = enabled;
+}
+
+void GemmaModel::enable_parameter_sharding(const sharding::ShardConfig& config) {
+    if(offload_) throw std::logic_error("parameter offload already enabled");
+    std::vector<FrozenModelOffload::Group> groups{{&embed_weight_},{&norm_weight_,&lm_head_weight_}};
+    for(auto& b:blocks_) {
+        if(!b.lora_initialized) throw std::logic_error("initialize LoRA before offload");
+        for(auto* lin:{b.q_proj_lora.get(),b.k_proj_lora.get(),b.v_proj_lora.get(),b.o_proj_lora.get(),
+                      b.gate_proj_lora.get(),b.up_proj_lora.get(),b.down_proj_lora.get()})
+            if(lin && lin->is_merged()) throw std::logic_error("unmerge LoRA before offload");
+        groups.push_back({&b.input_layernorm_weight,&b.post_attention_layernorm_weight,
+            &b.pre_feedforward_layernorm_weight,&b.post_feedforward_layernorm_weight,
+            &b.q_proj_weight,&b.k_proj_weight,&b.v_proj_weight,&b.o_proj_weight,&b.q_norm_weight,&b.k_norm_weight,
+            &b.gate_proj_weight,&b.up_proj_weight,&b.down_proj_weight});
+    }
+    offload_=std::make_unique<FrozenModelOffload>(config,groups);
+    for(auto& b:blocks_) for(auto* lin:{b.q_proj_lora.get(),b.k_proj_lora.get(),b.v_proj_lora.get(),b.o_proj_lora.get(),
+                                      b.gate_proj_lora.get(),b.up_proj_lora.get(),b.down_proj_lora.get()})
+        if(lin) lin->set_base_weights(nullptr);
+    offload_->offload_all();
 }
 
 void GemmaModel::maybe_dump_embedding(const TensorPtr& hidden_states,
