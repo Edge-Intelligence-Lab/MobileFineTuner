@@ -150,6 +150,7 @@ Two caveats:
 | round trip: fp32 → `--save_quantized` → `--load_quantized` | step-1 numerics identical: `loss 4.3130`, `ppl 74.67`, `grad_norm 0.174` |
 | int8 dot product: AVX2 vs scalar | checksums equal |
 | `grad_x` kernel: AVX2 vs scalar | max relative difference 2.1e-7 |
+| merge/unmerge on a quantized layer | merge changes the output by 0.6-0.9% (requantization only); unmerge restores it exactly (0.0) |
 | dequantize(quantize(x)) | relative error < 1e-6 |
 
 The step-1 equivalence is the strongest single check: the same seed produces

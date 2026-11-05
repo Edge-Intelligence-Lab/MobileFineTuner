@@ -718,12 +718,67 @@ TensorPtr LoRALinear::forward(const TensorPtr& x) const {
     return y;
 }
 
+// Rebuild the Q8_0 blocks from an fp32 [K, M] buffer (transposed to [M, K]
+// first, which is the layout the quantized buffer uses).
+void LoRALinear::requantize_from_fp32(const float* w, int64_t K, int64_t M) {
+    const int64_t n = K * M;
+    std::vector<float> w_t(static_cast<size_t>(n));
+    for (int64_t kk = 0; kk < K; ++kk) {
+        const float* src_row = w + kk * M;
+        for (int64_t j = 0; j < M; ++j) {
+            w_t[static_cast<size_t>(j) * K + kk] = src_row[j];
+        }
+    }
+    quantize_row_q8_0_ref(w_t.data(), quantized_weight_.data(), static_cast<int>(n));
+}
+
+// Materialise the quantized blocks as an fp32 [K, M] tensor.
+TensorPtr LoRALinear::dequantize_to_fp32() const {
+    const int64_t K = q8_k_;
+    const int64_t M = q8_m_;
+    const int64_t kb = K / Q8_0_BLOCK_SIZE;
+    auto out = zeros({K, M}, DType::kFloat32, kCPU);
+    std::vector<float> tmp(static_cast<size_t>(M) * K);
+    for (int64_t o = 0; o < M; ++o) {
+        dequantize_row_q8_0(quantized_weight_.data() + o * kb,
+                            tmp.data() + o * K, static_cast<int>(K));
+    }
+    float* dst = out->data<float>();
+    for (int64_t o = 0; o < M; ++o) {
+        for (int64_t kk = 0; kk < K; ++kk) {
+            dst[kk * M + o] = tmp[static_cast<size_t>(o) * K + kk];
+        }
+    }
+    return out;
+}
+
 void LoRALinear::merge_to_base() {
     if (merged_ || slices_.empty()) return;
+
+    // Quantized base: fold the delta into an fp32 view and re-quantize. The
+    // previous behaviour (merge into W_ only) was worse than doing nothing --
+    // forward() reads the blocks, so the adapter's contribution vanished while
+    // `merged_` suppressed the LoRA branch, silently discarding the delta.
+    if (is_quantized_) {
+        merge_backup_q8_ = quantized_weight_;
+        if (W_) {
+            for (const auto& slice : slices_) {
+                apply_lora_delta_to_base(W_, slice, +1.0f);
+            }
+            requantize_from_fp32(W_->data<float>(), q8_k_, q8_m_);
+        } else {
+            auto base = dequantize_to_fp32();
+            for (const auto& slice : slices_) {
+                apply_lora_delta_to_base(base, slice, +1.0f);
+            }
+            requantize_from_fp32(base->data<float>(), q8_k_, q8_m_);
+        }
+        merged_ = true;
+        return;
+    }
+
     if (!W_) {
-        throw std::runtime_error(
-            "LoRALinear::merge_to_base: no fp32 base weight (loaded from an int8 "
-            "checkpoint); dequantize the layer first");
+        throw std::runtime_error("LoRALinear::merge_to_base: no base weight");
     }
 
     const size_t nbytes = tensor_nbytes(W_);
@@ -742,21 +797,38 @@ void LoRALinear::merge_to_base() {
 void LoRALinear::unmerge_from_base() {
     if (!merged_ || slices_.empty()) return;
 
-    const size_t nbytes = tensor_nbytes(W_);
-    if (!merge_backup_.empty()) {
-        if (merge_backup_.size() != nbytes) {
-            throw std::runtime_error("LoRALinear::unmerge_from_base: merge backup size mismatch");
+    // Restore the pre-merge Q8_0 blocks (and the fp32 base if it was touched).
+    if (is_quantized_ && !merge_backup_q8_.empty()) {
+        quantized_weight_ = merge_backup_q8_;
+        merge_backup_q8_.clear();
+        if (W_ && !merge_backup_.empty()) {
+            const size_t nb = tensor_nbytes(W_);
+            if (nb == merge_backup_.size()) {
+                std::memcpy(W_->data_ptr(), merge_backup_.data(), nb);
+            }
+            merge_backup_.clear();
         }
-        if (nbytes != 0) {
-            std::memcpy(W_->data_ptr(), merge_backup_.data(), nbytes);
-        }
-        merge_backup_.clear();
         merged_ = false;
         return;
     }
 
-    for (const auto& slice : slices_) {
-        apply_lora_delta_to_base(W_, slice, -1.0f);
+    if (W_) {
+        const size_t nbytes = tensor_nbytes(W_);
+        if (!merge_backup_.empty()) {
+            if (merge_backup_.size() != nbytes) {
+                throw std::runtime_error("LoRALinear::unmerge_from_base: merge backup size mismatch");
+            }
+            if (nbytes != 0) {
+                std::memcpy(W_->data_ptr(), merge_backup_.data(), nbytes);
+            }
+            merge_backup_.clear();
+            merged_ = false;
+            return;
+        }
+
+        for (const auto& slice : slices_) {
+            apply_lora_delta_to_base(W_, slice, -1.0f);
+        }
     }
     
     merged_ = false;
