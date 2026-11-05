@@ -116,6 +116,12 @@ public:
      */
     void adopt_quantized_weight(int64_t K, int64_t M, std::vector<block_q8_0> blocks);
 
+    /// Rebuild the Q8_0 blocks from an fp32 [K, M] buffer.
+    void requantize_from_fp32(const float* w, int64_t K, int64_t M);
+
+    /// Materialise the quantized blocks as an fp32 [K, M] tensor.
+    TensorPtr dequantize_to_fp32() const;
+
 private:
     TensorPtr W_;  // [in_dim, out_dim] (references base, not owning)
     TensorPtr b_;  // [out_dim]
@@ -131,6 +137,8 @@ private:
     // loading an int8 checkpoint (where there is no fp32 tensor at all).
     int64_t q8_k_ = 0;
     int64_t q8_m_ = 0;
+    // Pre-merge Q8_0 blocks, restored by unmerge_from_base().
+    std::vector<block_q8_0> merge_backup_q8_;
 };
 
 }  // namespace ops

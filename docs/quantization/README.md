@@ -143,9 +143,10 @@ truncated or foreign file fails with a message instead of misbehaving.
 
 - **`--quantize` and `--load_quantized` are mutually exclusive.** A loaded model
   is already quantized; re-quantizing is rejected.
-- **`merge_to_base()` is unavailable** after loading a `.q8` checkpoint: there
-  is no fp32 base weight to add the delta to. Quantize from the fp32 weights if
-  you need to merge.
+- **Merging a quantized layer re-quantizes it.** `merge_to_base()` folds the
+  LoRA delta into an fp32 view of the base and quantizes again, so the merged
+  result differs from the un-merged one by the quantization error (measured at
+  0.6-0.9% relative). `unmerge_from_base()` restores the exact pre-merge blocks.
 - **`wte` is not quantized.** It is 31% of the parameters and also the `lm_head`
   projection, so it is the largest remaining opportunity (roughly 107 MiB of the
   236.8 MiB file).
