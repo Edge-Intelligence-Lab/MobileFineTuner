@@ -108,7 +108,7 @@ set(FINETUNE_SOURCES
     finetune_ops/core/lm_loss.cpp
     finetune_ops/core/memory_efficient_attention.cpp
     finetune_ops/core/checkpoint.cpp
-    opt_ops/sharding/parameter_sharder.cpp
+    finetune_ops/memory/parameter_sharder.cpp
     finetune_ops/core/performance_monitor.cpp
     finetune_ops/core/tokenizer.cpp
     
@@ -229,9 +229,8 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/energy
     FILES_MATCHING PATTERN "*.h"
 )
 
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/opt_ops/sharding
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/opt_ops
-    FILES_MATCHING PATTERN "*.h"
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/memory/parameter_sharder.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/finetune_ops/memory
 )
 
 install(DIRECTORY

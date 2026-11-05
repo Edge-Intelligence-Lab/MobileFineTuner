@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../finetune_ops/core/tensor.h"
+#include "../core/tensor.h"
 #include <cstddef>
 #include <cstdint>
 #include <mutex>

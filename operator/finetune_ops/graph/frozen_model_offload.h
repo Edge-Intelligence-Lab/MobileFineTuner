@@ -1,5 +1,5 @@
 #pragma once
-#include "../../opt_ops/sharding/parameter_sharder.h"
+#include "../memory/parameter_sharder.h"
 #include "../nn/lora_linear.h"
 
 namespace ops {
