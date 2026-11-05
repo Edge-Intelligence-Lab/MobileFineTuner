@@ -64,6 +64,94 @@ skipped entirely.
 | LoRA `A` / `B` | fp32 | trainable |
 | Gradients | fp32 | backward runs in fp32 against the dequantized blocks |
 
+## Model input and output
+
+### How the weights are read in
+
+Both entry points live in `examples/gpt2_small_lora_finetune/src/main.cpp`.
+
+**fp32 checkpoint (default)**
+
+```cpp
+GPT2Config cfg = GPT2Config::from_pretrained(dir + "/config.json");
+SafeTensorsModelReader reader(dir);
+auto loaded = reader.load_tensors_mapped(
+    GPT2KeyMapper::generate_gpt2_mapping(cfg.n_layer), opts);
+for (auto& kv : loaded) model.assign_weight(kv.first, kv.second);
+model.init_lora_modules();          // wraps the 4 linear weights per block
+
+// only with --quantize q8_0
+for (int li = 0; li < cfg.n_layer; ++li) {
+    auto& blk = model.get_block(li);
+    for (LoRALinear* lin : {blk.qkv_lin.get(), blk.proj_lin.get(),
+                            blk.fc_in_lin.get(), blk.fc_out_lin.get()}) {
+        if (lin && lin->W()) lin->quantize_base_weight_q8_0(/*allow_skip=*/true);
+    }
+}
+```
+
+**Q8_0 checkpoint (`--load_quantized PATH`)**
+
+```cpp
+std::vector<ops::QuantTensor> tensors;
+ops::read_quant_model(path, tensors, &err);
+for (auto& t : tensors) {
+    if (t.is_q8) { q8_pending.push_back(t); continue; }   // deferred
+    model.assign_weight(t.name, make_tensor(t));          // fp32 entries
+}
+model.init_lora_modules();     // LoRALinear holds a null base weight for now
+
+// Names look like "blocks.7.attn.qkv.weight"; the loop parses the block index
+// and the sub-key, picks the matching LoRALinear, and installs the blocks:
+for (auto& t : q8_pending) {
+    LoRALinear* lin = /* blk.qkv_lin / proj_lin / fc_in_lin / fc_out_lin */;
+    lin->adopt_quantized_weight(t.k, t.m, std::move(t.q8));
+}
+```
+
+`--pretrained_dir` is still required in both cases: it provides `config.json`
+and the tokenizer. With `--load_quantized` the `.safetensors` file is **not
+opened** — the loader prints `[load] source: Q8_0 checkpoint` so you can confirm
+which path ran.
+
+Tensor names in a `.q8` file are the same keys `assign_weight()` accepts
+(`blocks.0.attn.qkv.weight`, `wte.weight`, ...), so the two paths stay
+interchangeable.
+
+### What goes into forward()
+
+| argument | shape | dtype | notes |
+|---|---|---|---|
+| `input_ids` | `[B, S]` | **int32** | values in `[0, vocab)` |
+| `attention_mask` | `[B, S]` | **float32** | optional; `1` = keep, `0` = pad |
+
+```cpp
+TensorPtr logits = model.forward(input_ids);        // [B, S, vocab], float32
+```
+
+`S` may not exceed `n_positions` (1024 for GPT-2 small). The result holds
+next-token logits at every position: `logits[b, S-1, :]` is the distribution for
+the token after the last prompt token.
+
+### What the CLIs consume and produce
+
+| binary | input | output |
+|---|---|---|
+| `train` | token ids from WikiText-2, `[B, S]` int32 per step | per-step loss/PPL on stderr, LoRA adapter `.safetensors` |
+| `eval_ppl` | a `max_tokens` window of the valid split | `ppl` / `nll` and a `RESULT_JSON` line |
+| `--save_quantized` | the in-memory model after quantization | a `.q8` file (see [Checkpoint format](#checkpoint-format)) |
+
+### Is the interface different for a quantized model?
+
+No. `forward()` takes the same `input_ids` and returns the same
+`[B, S, vocab]` float32 logits; only the storage of the base weights and the
+arithmetic inside the linear layers change. Everything downstream — the loss,
+the backward pass, the evaluation code — is untouched.
+
+The one visible difference is the output projection: `logits = matmul(x, wteᵀ)`
+transposes `wte` (147 MiB) on every forward. That cost exists in both paths and
+is not affected by this change; quantizing `wte` would remove it as well.
+
 ## How the forward works
 
 ```
