@@ -85,6 +85,14 @@ public:
     const std::vector<LoRASlice>& slices() const { return slices_; }
     bool is_merged() const { return merged_; }
 
+    // For frozen disk-offload owners only. nullptr releases residency; forward
+    // requires rebinding. Adapter tensors and mixed-precision paths are unchanged.
+    void set_base_weights(const TensorPtr& weight, const TensorPtr& bias = nullptr) {
+        if (merged_) throw std::logic_error("cannot rebind merged LoRA base weights");
+        W_ = weight;
+        b_ = bias;
+    }
+
 private:
     TensorPtr W_;  // [in_dim, out_dim] (references base, not owning)
     TensorPtr b_;  // [out_dim]

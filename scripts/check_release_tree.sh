@@ -3,6 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")"/.. && pwd)"
 
+if ! command -v rg >/dev/null 2>&1; then
+  printf '%s\n' '[FAIL] ripgrep (rg) is required for the release tree audit' >&2
+  exit 1
+fi
+
 fail=0
 
 say() {

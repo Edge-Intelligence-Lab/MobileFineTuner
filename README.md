@@ -480,6 +480,11 @@ Detailed design and extension rules are in
 
 ## Runtime Memory Controls
 
+Opt-in **frozen parameter disk offload, activation checkpointing, and trainable
+streaming attention** for Qwen/Gemma are documented in
+[Memory optimizations](docs/MEMORY_OPTIMIZATIONS.md), including CLI switches,
+gradient tests, and the supported CPU FP32 scope. All are disabled by default.
+
 MobileFineTuner keeps the stable library focused on transparent C++ training
 semantics. The default memory controls are explicit and easy to audit:
 
@@ -690,3 +695,4 @@ limitations under the License.
 <div align="center">
   <img src="logo.jpg" alt="Duke University & Duke Kunshan University" width="250"/>
 </div>
+

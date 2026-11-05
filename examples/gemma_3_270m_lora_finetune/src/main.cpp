@@ -212,6 +212,10 @@ struct CliOptions {
     int preview_tokens = 0;
     bool synthetic_smoke = false;
     int smoke_steps = 2;
+    bool activation_checkpointing = false;
+    bool memory_efficient_attention = false;
+    std::string offload_dir;
+    int offload_resident_mb = 1536;
 };
 
 CliOptions parse_cli(int argc, char** argv) {
@@ -224,7 +228,17 @@ CliOptions parse_cli(int argc, char** argv) {
             if (i + 1 < argc) return argv[++i];
             return "";
         };
-        if (arg.rfind("--model_dir", 0) == 0) {
+        if (arg == "--activation_checkpointing") {
+            opts.activation_checkpointing = true;
+        } else if (arg == "--memory_efficient_attention") {
+            opts.memory_efficient_attention = true;
+        } else if (arg == "--offload_dir" || arg.rfind("--offload_dir=", 0) == 0) {
+            opts.offload_dir = get_val("--offload_dir");
+            if (opts.offload_dir.empty() || opts.offload_dir.rfind("--", 0) == 0)
+                throw std::runtime_error("--offload_dir requires a path");
+        } else if (arg == "--offload_resident_mb" || arg.rfind("--offload_resident_mb=", 0) == 0) {
+            opts.offload_resident_mb = std::stoi(get_val("--offload_resident_mb"));
+        } else if (arg.rfind("--model_dir", 0) == 0) {
             opts.model_dir = get_val("--model_dir");
         } else if (arg.rfind("--data_dir", 0) == 0) {
             opts.data_dir = get_val("--data_dir");
@@ -438,6 +452,10 @@ static int run_synthetic_smoke(const CliOptions& cli) {
 int main(int argc, char** argv) {
     try {
         auto cli = parse_cli(argc, argv);
+        const bool memory_options = cli.activation_checkpointing || cli.memory_efficient_attention || !cli.offload_dir.empty();
+        if (memory_options && (cli.synthetic_smoke || !cli.align_dump_dir.empty() || !cli.align_pt_weights_dir.empty() || cli.align_numeric_attn || cli.lora_dropout != 0))
+            throw std::runtime_error("memory options require real deterministic training, dropout=0, and no alignment/debug mode");
+        if (cli.offload_resident_mb <= 0) throw std::runtime_error("--offload_resident_mb must be positive");
         if (cli.synthetic_smoke) {
             return run_synthetic_smoke(cli);
         }
@@ -503,6 +521,15 @@ int main(int argc, char** argv) {
         GemmaLoraInjector injector;
         injector.inject(model, lora_spec);
         injector.print_info();
+        model.set_memory_efficient_attention(cli.memory_efficient_attention);
+        model.set_activation_checkpointing(cli.activation_checkpointing);
+        if (!cli.offload_dir.empty()) {
+            tensors.clear(); // Avoid retaining a second set of base-weight handles.
+            sharding::ShardConfig offload;
+            offload.offload_dir = cli.offload_dir;
+            offload.max_resident_bytes = static_cast<size_t>(cli.offload_resident_mb) * 1024 * 1024;
+            model.enable_parameter_sharding(offload);
+        }
 
         if (!cli.align_pt_weights_dir.empty()) {
             auto load_lora_a = [&](LoRALinear* lora) {
@@ -820,6 +847,12 @@ int main(int argc, char** argv) {
 
         GemmaLoRATrainer trainer(model, injector, train_data, eval_data, trainer_cfg);
         trainer.train();
+        if (!cli.offload_dir.empty()) {
+            const auto stats = model.sharding_stats();
+            std::cout << "[Offload] payload_read_bytes=" << stats.bytes_read
+                      << " payload_written_bytes=" << stats.bytes_written
+                      << " loads=" << stats.loads << " evictions=" << stats.evictions << std::endl;
+        }
 
         std::cout << "[Save] Writing LoRA adapter..." << std::endl;
         trainer.save_lora(trainer_cfg.output_dir + "/gemma_lora.safetensors");
@@ -831,3 +864,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
+

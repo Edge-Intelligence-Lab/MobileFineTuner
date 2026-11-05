@@ -54,6 +54,14 @@ TensorPtr memory_efficient_attention(
     const MemoryEfficientAttentionConfig& config = {}
 );
 
+// CPU FP32 training with the new engine recomputes probabilities per row.
+// Masks are constant additive biases; explicit masks replace automatic causality.
+// All -infinity rows have zero output/gradient. Legacy training uses the fallback.
+TensorPtr memory_efficient_attention(
+    const TensorPtr& q, const TensorPtr& k, const TensorPtr& v,
+    const TensorPtr& causal_mask, const TensorPtr& padding_bias,
+    const MemoryEfficientAttentionConfig& config);
+
 /**
  * @brief Online/streaming softmax (single-row version for attention)
  * 

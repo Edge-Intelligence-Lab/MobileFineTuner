@@ -334,6 +334,7 @@ std::vector<std::pair<std::string, TensorPtr>> LoRALinear::debug_params() const 
 }
 
 TensorPtr LoRALinear::forward(const TensorPtr& x) const {
+    if (!W_) throw std::logic_error("LoRALinear base is offloaded; reload before forward");
     const bool debug = std::getenv("LORA_LINEAR_TEST_DEBUG") != nullptr;
     auto log_shape = [&](const std::string& tag, const TensorPtr& a, const TensorPtr& b) {
         if (!debug) return;
