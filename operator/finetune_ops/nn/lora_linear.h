@@ -105,6 +105,16 @@ public:
     bool is_quantized() const { return is_quantized_; }
     const std::vector<block_q8_0>& quantized_weight() const { return quantized_weight_; }
     int64_t quantized_numel() const { return quantized_numel_; }
+    int64_t quantized_k() const { return q8_k_; }   // in_features
+    int64_t quantized_m() const { return q8_m_; }   // out_features
+
+    /**
+     * @brief Install a Q8_0 base weight that was loaded from a checkpoint.
+     *
+     * After this the layer computes from the blocks alone, so W_ may stay null
+     * -- that is what makes an int8 checkpoint load without the fp32 original.
+     */
+    void adopt_quantized_weight(int64_t K, int64_t M, std::vector<block_q8_0> blocks);
 
 private:
     TensorPtr W_;  // [in_dim, out_dim] (references base, not owning)
@@ -117,6 +127,10 @@ private:
     std::vector<block_q8_0> quantized_weight_;   // 量化后的 block 数组
     int64_t quantized_numel_ = 0;                // 原始元素个数（用于反量化）
     bool is_quantized_ = false;                  // 标记是否使用量化基础权重
+    // Base weight shape, kept independently of W_ so the layer works after
+    // loading an int8 checkpoint (where there is no fp32 tensor at all).
+    int64_t q8_k_ = 0;
+    int64_t q8_m_ = 0;
 };
 
 }  // namespace ops

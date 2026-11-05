@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cmath>
+#include <regex>
 #include <algorithm>
 #include <filesystem>
 
@@ -23,6 +24,7 @@
 #include "finetune_ops/optim/adam.h"
 #include "finetune_ops/optim/smoke_utils.h"
 #include "finetune_ops/core/memory_manager.h"
+#include "finetune_ops/core/quant_io.h"
 
 using namespace std;
 using namespace ops;
@@ -59,6 +61,8 @@ struct CmdArgs {
     float ema_beta = 0.9f;
     // Q8_0 quantization of the frozen base weights ("" = fp32)
     string quantize;
+    string load_quantized;
+    string save_quantized;
     int seed = 42;
     bool synthetic_smoke = false;
     int smoke_steps = 2;
@@ -94,6 +98,8 @@ static void print_usage(const char* prog) {
          << "  --save_every N           Checkpoint interval (steps)\n"
          << "  --ema_beta F             EMA smoothing factor\n"
          << "  --quantize q8_0          Quantize the frozen base weights to Q8_0\n"
+        << "  --save_quantized PATH    Write the Q8_0 model (int8 linears + fp32 rest)\n"
+        << "  --load_quantized PATH    Load a Q8_0 model directly (skips the fp32 file)\n"
          << "                           (LoRA params stay fp32; forward uses the\n"
          << "                           fused int8 kernel, backward reads int8 too)\n"
          << "  --seed N                 Random seed\n"
@@ -140,6 +146,8 @@ static CmdArgs parse_args(int argc, char** argv) {
         else if (k == "--ema_beta") args.ema_beta = stof(get_val("--ema_beta"));
         else if (k == "--seed") args.seed = stoi(get_val("--seed"));
         else if (k == "--quantize") args.quantize = get_val("--quantize");
+        else if (k == "--load_quantized") args.load_quantized = get_val("--load_quantized");
+        else if (k == "--save_quantized") args.save_quantized = get_val("--save_quantized");
         else if (k == "--synthetic_smoke") args.synthetic_smoke = true;
         else if (k == "--smoke_steps") args.smoke_steps = stoi(get_val("--smoke_steps"));
         else if (k == "--help" || k == "-h") { print_usage(argv[0]); exit(0); }
@@ -328,17 +336,47 @@ int main(int argc, char** argv) {
         model.tie_weights();
         model.print_model_info();
 
-        SafeTensorsModelReader reader(args.pretrained_dir);
-        reader.parse_headers();
-        auto key_map = GPT2KeyMapper::generate_gpt2_mapping(cfg.n_layer);
-        // Linear weights in GPT-2 safetensors are stored as [in, out] (e.g., [768, 2304]); no transpose needed.
-        // Explicitly disable load-time transpose to avoid runtime transposition overhead.
-        SafeTensorsLoadOptions load_opts;
-        load_opts.transpose_linear = false;
-        load_opts.verbose = false;        // reduce loader verbosity during training
-        auto loaded = reader.load_tensors_mapped(key_map, load_opts);
-        for (const auto& kv : loaded) {
-            model.assign_weight(kv.first, kv.second);
+        // Two ways in: the original fp32 safetensors, or a self-contained Q8_0
+        // file produced by --save_quantized. The latter stores the 48 linear
+        // weights as int8 blocks, so the fp32 originals are never read.
+        vector<ops::QuantTensor> q8_pending;
+        const bool from_q8 = !args.load_quantized.empty();
+        if (!from_q8) {
+            SafeTensorsModelReader reader(args.pretrained_dir);
+            reader.parse_headers();
+            auto key_map = GPT2KeyMapper::generate_gpt2_mapping(cfg.n_layer);
+            // Linear weights in GPT-2 safetensors are stored as [in, out] (e.g., [768, 2304]); no transpose needed.
+            // Explicitly disable load-time transpose to avoid runtime transposition overhead.
+            SafeTensorsLoadOptions load_opts;
+            load_opts.transpose_linear = false;
+            load_opts.verbose = false;        // reduce loader verbosity during training
+            auto loaded = reader.load_tensors_mapped(key_map, load_opts);
+            for (const auto& kv : loaded) {
+                model.assign_weight(kv.first, kv.second);
+            }
+            cout << "  [load] source: fp32 safetensors" << endl;
+        } else {
+            vector<ops::QuantTensor> tensors;
+            string qerr;
+            if (!ops::read_quant_model(args.load_quantized, tensors, &qerr)) {
+                cerr << "[ERROR] --load_quantized: " << qerr << endl;
+                return 1;
+            }
+            size_t n_f32 = 0;
+            for (auto& t : tensors) {
+                if (t.is_q8) {
+                    q8_pending.push_back(std::move(t));
+                    continue;
+                }
+                // 4-arg overload copies; the 5-arg one WRAPS the buffer, which
+                // would dangle as soon as `tensors` goes out of scope.
+                auto ten = std::make_shared<Tensor>(
+                    t.shape, static_cast<const void*>(t.f32.data()), DType::kFloat32, kCPU);
+                model.assign_weight(t.name, ten);
+                ++n_f32;
+            }
+            cout << "  [load] source: Q8_0 checkpoint, fp32 tensors=" << n_f32
+                 << " q8 tensors=" << q8_pending.size() << endl;
         }
         cout << "  ✓ Model loaded" << endl;
 
@@ -349,7 +387,42 @@ int main(int argc, char** argv) {
         // they remain trainable. Requires init_lora_modules() first, because
         // forward() only routes through the LoRALinear wrappers.
         model.init_lora_modules();
+
+        // Install int8 base weights that came from a Q8_0 checkpoint.
+        if (!q8_pending.empty()) {
+            std::regex q8_name(R"(blocks\.(\d+)\.(.+))");
+            int adopted = 0;
+            for (auto& t : q8_pending) {
+                std::smatch m;
+                if (!std::regex_match(t.name, m, q8_name)) {
+                    cerr << "[WARN] --load_quantized: unexpected q8 tensor name " << t.name << "\n";
+                    continue;
+                }
+                const int li = std::stoi(m[1].str());
+                const string sub = m[2].str();
+                if (li < 0 || li >= cfg.n_layer) continue;
+                auto& blk = model.get_block(li);
+                LoRALinear* lin = nullptr;
+                if (sub == "attn.qkv.weight") lin = blk.qkv_lin.get();
+                else if (sub == "attn.proj.weight") lin = blk.proj_lin.get();
+                else if (sub == "mlp.fc_in.weight") lin = blk.fc_in_lin.get();
+                else if (sub == "mlp.fc_out.weight") lin = blk.fc_out_lin.get();
+                if (!lin) continue;
+                lin->adopt_quantized_weight(t.k, t.m, std::move(t.q8));
+                ++adopted;
+            }
+            cout << "  [load] int8 base weights adopted: " << adopted << endl;
+            if (adopted == 0) {
+                cerr << "[ERROR] --load_quantized: no layer accepted the int8 weights" << endl;
+                return 1;
+            }
+        }
+
         if (!args.quantize.empty()) {
+            if (from_q8) {
+                cerr << "[ERROR] --quantize cannot be combined with --load_quantized" << endl;
+                return 1;
+            }
             const auto t_q0 = chrono::steady_clock::now();
             int quantized = 0, skipped = 0;
             for (int li = 0; li < cfg.n_layer; ++li) {
@@ -371,6 +444,61 @@ int main(int argc, char** argv) {
                 cerr << "[ERROR] --quantize requested but nothing could be quantized" << endl;
                 return 1;
             }
+        }
+
+        // Write the current quantized model out (self-contained: int8 linears +
+        // fp32 embeddings/norms/biases).
+        if (!args.save_quantized.empty()) {
+            vector<ops::QuantTensor> out;
+            auto push_f32 = [&](const string& name, const TensorPtr& tt) {
+                if (!tt) return;
+                ops::QuantTensor e;
+                e.name = name;
+                e.shape = tt->shape();
+                const float* p = tt->data<float>();
+                e.f32.assign(p, p + tt->numel());
+                out.push_back(std::move(e));
+            };
+            auto push_q8 = [&](const string& name, const LoRALinear* lin) {
+                if (!lin || !lin->is_quantized()) return;
+                ops::QuantTensor e;
+                e.name = name;
+                e.is_q8 = true;
+                e.k = lin->quantized_k();
+                e.m = lin->quantized_m();
+                e.q8 = lin->quantized_weight();
+                out.push_back(std::move(e));
+            };
+            for (int li = 0; li < cfg.n_layer; ++li) {
+                auto& b = model.get_block(li);
+                const string p = "blocks." + std::to_string(li) + ".";
+                push_q8(p + "attn.qkv.weight", b.qkv_lin.get());
+                push_q8(p + "attn.proj.weight", b.proj_lin.get());
+                push_q8(p + "mlp.fc_in.weight", b.fc_in_lin.get());
+                push_q8(p + "mlp.fc_out.weight", b.fc_out_lin.get());
+                push_f32(p + "attn.qkv.bias", b.attn_qkv_bias);
+                push_f32(p + "attn.proj.bias", b.attn_proj_bias);
+                push_f32(p + "mlp.fc_in.bias", b.mlp_fc_in_bias);
+                push_f32(p + "mlp.fc_out.bias", b.mlp_fc_out_bias);
+                push_f32(p + "ln_1.weight", b.ln_1_weight);
+                push_f32(p + "ln_1.bias", b.ln_1_bias);
+                push_f32(p + "ln_2.weight", b.ln_2_weight);
+                push_f32(p + "ln_2.bias", b.ln_2_bias);
+            }
+            push_f32("wte.weight", model.wte());
+            push_f32("wpe.weight", model.wpe());
+            push_f32("ln_f.weight", model.ln_f_weight());
+            push_f32("ln_f.bias", model.ln_f_bias());
+
+            string werr;
+            if (!ops::write_quant_model(args.save_quantized, out, &werr)) {
+                cerr << "[ERROR] --save_quantized: " << werr << endl;
+                return 1;
+            }
+            size_t nq = 0;
+            for (const auto& e : out) nq += e.is_q8 ? 1 : 0;
+            cout << "  [save] wrote " << out.size() << " tensors (" << nq
+                 << " int8) to " << args.save_quantized << endl;
         }
 
         // 2) Initialize LoRA and inject / resume
