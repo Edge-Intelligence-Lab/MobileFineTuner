@@ -11,6 +11,7 @@
 #include "ops.h"
 #include "backward_functions.h"
 #include "autograd_engine.h"
+#include "tensor_copy.h"
 #include <cmath>
 #include <algorithm>
 #include <numeric>
@@ -290,7 +291,8 @@ namespace {
             int64_t dim_a = (static_cast<size_t>(i) < shape_a.size()) ? shape_a[shape_a.size() - 1 - i] : 1;
             int64_t dim_b = (static_cast<size_t>(i) < shape_b.size()) ? shape_b[shape_b.size() - 1 - i] : 1;
 
-            result_shape[max_ndim - 1 - i] = std::max(dim_a, dim_b);
+            // Broadcasting a singleton to an empty axis must stay empty.
+            result_shape[max_ndim - 1 - i] = dim_a == 1 ? dim_b : dim_a;
         }
 
         return result_shape;
@@ -316,55 +318,62 @@ namespace {
 
         auto result_shape = broadcast_shapes(a, b);
         auto result = zeros(result_shape, a->dtype(), a->device());
+        const int64_t count = result->numel();
 
         if (shapes_equal(a, b)) {
             const float* data_a = a->data<float>();
             const float* data_b = b->data<float>();
             float* result_data = result->data<float>();
 
-            for (int64_t i = 0; i < a->numel(); ++i) {
+            for (int64_t i = 0; i < count; ++i) {
                 result_data[i] = op(data_a[i], data_b[i]);
             }
-        } else {
-            // Complete broadcast implementsation
+        } else if (count != 0) {
             const float* data_a = a->data<float>();
             const float* data_b = b->data<float>();
             float* result_data = result->data<float>();
-            
-            auto shape_a = a->shape();
-            auto shape_b = b->shape();
-            
-            for (int64_t i = 0; i < result->numel(); ++i) {
-                // Calculate multidimensional index of current position in result
-                std::vector<int64_t> result_idx(result_shape.size());
-                int64_t temp = i;
-                for (int j = result_shape.size() - 1; j >= 0; --j) {
-                    result_idx[j] = temp % result_shape[j];
-                    temp /= result_shape[j];
+
+            const size_t rank = result_shape.size();
+            auto aligned_strides = [rank](const std::vector<int64_t>& shape) {
+                std::vector<int64_t> strides(rank, 0);
+                int64_t stride = 1;
+                for (size_t d = shape.size(); d-- > 0;) {
+                    strides[rank - shape.size() + d] = shape[d] == 1 ? 0 : stride;
+                    stride *= shape[d];
                 }
-                
-                // Calculate corresponding indices for a and b (simplified version)
-                int64_t idx_a = 0, idx_b = 0;
-                
-                // Calculate linear index for a
-                for (size_t dim = 0; dim < shape_a.size(); ++dim) {
-                    int result_dim = dim + (result_shape.size() - shape_a.size());
-                    if (result_dim >= 0) {
-                        int64_t coord = (shape_a[dim] == 1) ? 0 : result_idx[result_dim];
-                        idx_a = idx_a * shape_a[dim] + coord;
+                return strides;
+            };
+            const auto strides_a = aligned_strides(a->shape());
+            const auto strides_b = aligned_strides(b->shape());
+            const int64_t width = result_shape.back();
+            const bool row_a = strides_a.back() != 0;
+            const bool row_b = strides_b.back() != 0;
+            std::vector<int64_t> coordinate(rank - 1, 0);
+            int64_t offset_a = 0, offset_b = 0;
+            // Advance an odometer once per row, not a coordinate vector per element.
+            for (int64_t out = 0; out < count; out += width) {
+                const float* pa = data_a + offset_a;
+                const float* pb = data_b + offset_b;
+                float* dst = result_data + out;
+                if (row_a && row_b) {
+                    for (int64_t j = 0; j < width; ++j) dst[j] = op(pa[j], pb[j]);
+                } else if (row_a) {
+                    for (int64_t j = 0; j < width; ++j) dst[j] = op(pa[j], pb[0]);
+                } else if (row_b) {
+                    for (int64_t j = 0; j < width; ++j) dst[j] = op(pa[0], pb[j]);
+                } else {
+                    for (int64_t j = 0; j < width; ++j) dst[j] = op(pa[0], pb[0]);
+                }
+                for (size_t d = rank - 1; d-- > 0;) {
+                    if (++coordinate[d] < result_shape[d]) {
+                        offset_a += strides_a[d];
+                        offset_b += strides_b[d];
+                        break;
                     }
+                    coordinate[d] = 0;
+                    offset_a -= (result_shape[d] - 1) * strides_a[d];
+                    offset_b -= (result_shape[d] - 1) * strides_b[d];
                 }
-                
-                // Calculate linear index for b
-                for (size_t dim = 0; dim < shape_b.size(); ++dim) {
-                    int result_dim = dim + (result_shape.size() - shape_b.size());
-                    if (result_dim >= 0) {
-                        int64_t coord = (shape_b[dim] == 1) ? 0 : result_idx[result_dim];
-                        idx_b = idx_b * shape_b[dim] + coord;
-                    }
-                }
-                
-                result_data[i] = op(data_a[idx_a], data_b[idx_b]);
             }
         }
 
@@ -383,7 +392,8 @@ namespace {
         const float* x_data = x->data<float>();
         float* result_data = result->data<float>();
 
-        for (int64_t i = 0; i < x->numel(); ++i) {
+        const int64_t count = x->numel();
+        for (int64_t i = 0; i < count; ++i) {
             result_data[i] = op(x_data[i]);
         }
 
@@ -1007,50 +1017,10 @@ TensorPtr transpose(const TensorPtr& tensor, int dim0, int dim1) {
     // createresulttensor
     auto result = zeros(new_shape, tensor->dtype(), tensor->device());
     
-    const size_t elem_size = DTypeUtils::size_of(tensor->dtype());
-    const char* src_data = static_cast<const char*>(tensor->data_ptr());
-    char* dst_data = static_cast<char*>(result->data_ptr());
-    
-        // [Translated]
-    std::vector<int64_t> strides_src(ndim), strides_dst(ndim);
-    
-    // Computesourcetensorstrides
-    strides_src[ndim - 1] = 1;
-    for (int i = ndim - 2; i >= 0; --i) {
-        strides_src[i] = strides_src[i + 1] * shape[i + 1];
-    }
-    
-    // Computetargettensorstrides
-    strides_dst[ndim - 1] = 1;
-    for (int i = ndim - 2; i >= 0; --i) {
-        strides_dst[i] = strides_dst[i + 1] * new_shape[i + 1];
-    }
-    
-    // executetranspose
-    int64_t total_elements = result->numel();
-    std::vector<int64_t> indices(ndim);
-    
-    for (int64_t linear_idx = 0; linear_idx < total_elements; ++linear_idx) {
-        // [Translated comment removed - see documentation]
-        int64_t temp = linear_idx;
-        for (int i = 0; i < ndim; ++i) {
-            indices[i] = temp / strides_dst[i];
-            temp %= strides_dst[i];
-        }
-        
-        // swapdimension
-        std::swap(indices[dim0], indices[dim1]);
-        
-                // [Translated]
-        int64_t src_idx = 0;
-        for (int i = 0; i < ndim; ++i) {
-            src_idx += indices[i] * strides_src[i];
-        }
-        
-        std::memcpy(dst_data + static_cast<size_t>(linear_idx) * elem_size,
-                    src_data + static_cast<size_t>(src_idx) * elem_size,
-                    elem_size);
-    }
+    auto source_strides = detail::dense_strides(shape);
+    std::swap(source_strides[dim0], source_strides[dim1]);
+    detail::copy_permuted(tensor->data_ptr(), result->data_ptr(), new_shape,
+                          source_strides, result->numel(), DTypeUtils::size_of(tensor->dtype()));
     
     // settingsgradientpropagate
     if (tensor->requires_grad()) {
@@ -1095,36 +1065,14 @@ TensorPtr permute(const TensorPtr& tensor, const std::vector<int>& dims) {
 
     auto result = zeros(new_shape, tensor->dtype(), tensor->device());
 
-    // Compute strides of source and destination
-    std::vector<int64_t> src_strides(ndim), dst_strides(ndim);
-    src_strides[ndim - 1] = 1;
-    for (int i = ndim - 2; i >= 0; --i) src_strides[i] = src_strides[i + 1] * shape[i + 1];
-    dst_strides[ndim - 1] = 1;
-    for (int i = ndim - 2; i >= 0; --i) dst_strides[i] = dst_strides[i + 1] * new_shape[i + 1];
-
-    const float* src = tensor->data<float>();
-    float* dst = result->data<float>();
-
-    int64_t total = result->numel();
-    std::vector<int64_t> out_idx(ndim);
-    std::vector<int64_t> in_idx(ndim);
-    for (int64_t linear = 0; linear < total; ++linear) {
-        // Decode dst index
-        int64_t tmp = linear;
-        for (int i = 0; i < ndim; ++i) {
-            out_idx[i] = tmp / dst_strides[i];
-            tmp %= dst_strides[i];
-        }
-        // Map to src index by inverse permutation
-        for (int i = 0; i < ndim; ++i) {
-            int dd = dims[i] < 0 ? dims[i] + ndim : dims[i];
-            in_idx[dd] = out_idx[i];
-        }
-        // Encode src linear index
-        int64_t src_lin = 0;
-        for (int i = 0; i < ndim; ++i) src_lin += in_idx[i] * src_strides[i];
-        dst[linear] = src[src_lin];
+    const auto dense_strides = detail::dense_strides(shape);
+    std::vector<int64_t> source_strides(ndim);
+    for (int i = 0; i < ndim; ++i) {
+        const int d = dims[i] < 0 ? dims[i] + ndim : dims[i];
+        source_strides[i] = dense_strides[d];
     }
+    detail::copy_permuted(tensor->data_ptr(), result->data_ptr(), new_shape,
+                          source_strides, result->numel(), DTypeUtils::size_of(tensor->dtype()));
 
     if (tensor->requires_grad()) {
         result->set_requires_grad(true);
