@@ -56,6 +56,9 @@ jobs:
             "cmake;3.22.1" \
             "ndk;26.1.10909125"
 
+      - name: Install release audit dependency
+        run: command -v rg >/dev/null 2>&1 || brew install ripgrep
+
       - name: Release tree audit
         run: bash scripts/check_release_tree.sh
 

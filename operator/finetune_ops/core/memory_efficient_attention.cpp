@@ -1,205 +1,154 @@
-/**
- * @file memory_efficient_attention.cpp
- * @brief Memory-efficient attention implementation
- */
-
 #include "memory_efficient_attention.h"
 #include "ops.h"
+#include "backward_functions.h"
+#ifdef USE_NEW_AUTOGRAD_ENGINE
+#include "autograd_engine.h"
+#endif
+#include <algorithm>
 #include <cmath>
 #include <limits>
-#include <algorithm>
 
 namespace ops {
-
 namespace {
-
-TensorPtr build_causal_mask_if_needed(int64_t seq_len, bool use_causal_mask, const Device& device) {
-    if (!use_causal_mask) {
-        return nullptr;
-    }
-    return create_causal_mask(static_cast<int>(seq_len), kFloat32, device);
+int64_t offset(const TensorPtr& t, int64_t b, int64_t h, int64_t s, int64_t d) {
+    const auto& shape = t->shape();
+    return ((b * shape[1] + h) * shape[2] + s) * shape[3] + d;
+}
+void check_tensor(const TensorPtr& t) {
+    if (!t || t->dtype() != kFloat32 || !t->device().is_cpu())
+        throw std::invalid_argument("streaming attention requires CPU FP32 tensors");
 }
 
-TensorPtr standard_attention_fallback(const TensorPtr& q,
-                                      const TensorPtr& k,
-                                      const TensorPtr& v,
-                                      const TensorPtr& causal_mask,
-                                      float scale,
-                                      bool use_causal_mask) {
-    auto k_t = transpose(k, 2, 3);
-    auto scores = mul(matmul(q, k_t), scale);
-
-    if (causal_mask) {
-        scores = add(scores, causal_mask);
-    } else {
-        auto generated_mask = build_causal_mask_if_needed(q->shape()[2], use_causal_mask, q->device());
-        if (generated_mask) {
-            scores = add(scores, generated_mask);
-        }
+// Forward and backward share masking and normalization; only O(S) scratch is used.
+void probabilities(const TensorPtr& q, const TensorPtr& k, const TensorPtr& mask,
+                   const TensorPtr& pad, float scale, bool causal,
+                   int64_t b, int64_t h, int64_t i, std::vector<float>& p) {
+    const int64_t S = q->shape()[2], D = q->shape()[3];
+    float maximum = -std::numeric_limits<float>::infinity();
+    for (int64_t j = 0; j < S; ++j) {
+        float score = 0;
+        for (int64_t d = 0; d < D; ++d)
+            score += q->data<float>()[offset(q,b,h,i,d)] * k->data<float>()[offset(k,b,h,j,d)];
+        score *= scale;
+        if (causal && j > i) score = -std::numeric_limits<float>::infinity();
+        if (mask) score += mask->data<float>()[i * S + j];
+        if (pad) score += pad->data<float>()[b * S + j];
+        if (std::isnan(score) || score == std::numeric_limits<float>::infinity())
+            throw std::runtime_error("streaming attention received non-finite logits");
+        p[j] = score;
+        maximum = std::max(maximum, score);
     }
-
-    auto probs = softmax(scores, -1);
-    return matmul(probs, v);
+    // An all -infinity row has no valid keys: output and gradient are zero.
+    if (maximum == -std::numeric_limits<float>::infinity()) {
+        std::fill(p.begin(), p.end(), 0.0f);
+        return;
+    }
+    float sum = 0;
+    for (auto& value : p) { value = std::exp(value - maximum); sum += value; }
+    for (auto& value : p) value /= sum;
 }
 
-}  // namespace
-
-void online_softmax_weighted_sum(
-    const float* logits,
-    const float* values,
-    int64_t seq_len,
-    int64_t head_dim,
-    float* output,
-    float max_val
-) {
-    // First pass: compute normalization denominator (use max_val for stability)
-    double sum_exp = 0.0;
-    for (int64_t j = 0; j < seq_len; ++j) {
-        sum_exp += std::exp(logits[j] - max_val);
-    }
-    
-    // Second pass: compute normalized weights and accumulate into output
-    float inv_sum = 1.0f / static_cast<float>(sum_exp);
-    for (int64_t j = 0; j < seq_len; ++j) {
-        float weight = std::exp(logits[j] - max_val) * inv_sum;
-        const float* v_row = values + j * head_dim;
-        
-        for (int64_t d = 0; d < head_dim; ++d) {
-            output[d] += weight * v_row[d];
-        }
-    }
-}
-
-TensorPtr memory_efficient_attention(
-    const TensorPtr& q,
-    const TensorPtr& k,
-    const TensorPtr& v,
-    const TensorPtr& causal_mask,
-    const MemoryEfficientAttentionConfig& config
-) {
-    // Validate input shapes
-    const auto& q_shape = q->shape();
-    const auto& k_shape = k->shape();
-    const auto& v_shape = v->shape();
-    
-    if (q_shape.size() != 4 || k_shape.size() != 4 || v_shape.size() != 4) {
-        throw std::runtime_error("memory_efficient_attention: inputs must be 4D [B,H,S,D]");
-    }
-    
-    int64_t batch = q_shape[0];
-    int64_t n_head = q_shape[1];
-    int64_t seq_len = q_shape[2];
-    int64_t head_dim = q_shape[3];
-    
-    // Validate k/v shapes match
-    if (k_shape[0] != batch || k_shape[1] != n_head || k_shape[2] != seq_len || k_shape[3] != head_dim) {
-        throw std::runtime_error("memory_efficient_attention: k shape mismatch");
-    }
-    if (v_shape[0] != batch || v_shape[1] != n_head || v_shape[2] != seq_len || v_shape[3] != head_dim) {
-        throw std::runtime_error("memory_efficient_attention: v shape mismatch");
-    }
-    
-    // Auto-compute scale factor
-    float scale = (config.scale > 0) ? config.scale : (1.0f / std::sqrt(static_cast<float>(head_dim)));
-
-    // Safety first: preserve correct gradients during training.
-    if (q->requires_grad() || k->requires_grad() || v->requires_grad()) {
-        return standard_attention_fallback(q, k, v, causal_mask, scale, config.use_causal_mask);
-    }
-    
-    // Prepare causal mask (if provided)
-    const float* mask_data = nullptr;
-    if (causal_mask) {
-        if (causal_mask->shape().size() != 2 || 
-            causal_mask->shape()[0] != seq_len || 
-            causal_mask->shape()[1] != seq_len) {
-            throw std::runtime_error("memory_efficient_attention: causal_mask must be [S,S]");
-        }
-        mask_data = causal_mask->data<float>();
-    }
-    
-    // Create output tensor
-    auto context = zeros({batch, n_head, seq_len, head_dim}, kFloat32, kCPU);
-    
-    const float* q_data = q->data<float>();
-    const float* k_data = k->data<float>();
-    const float* v_data = v->data<float>();
-    float* ctx_data = context->data<float>();
-    
-    // Main loop: iterate over batch, head, and query rows
-    for (int64_t b = 0; b < batch; ++b) {
-        for (int64_t h = 0; h < n_head; ++h) {
-            // Base offset for current head
-            int64_t head_offset = (b * n_head + h) * seq_len * head_dim;
-            const float* q_head = q_data + head_offset;
-            const float* k_head = k_data + head_offset;
-            const float* v_head = v_data + head_offset;
-            float* ctx_head = ctx_data + head_offset;
-            
-            // Process each query position
-            for (int64_t i = 0; i < seq_len; ++i) {
-                const float* q_row = q_head + i * head_dim;
-                float* ctx_row = ctx_head + i * head_dim;
-                
-                // === Pass 1: compute scores and max (numerically stable) ===
-                // Reuse per-row buffer to avoid repeated allocations
-                static thread_local std::vector<float> scores_buf;
-                if (scores_buf.size() < static_cast<size_t>(seq_len)) {
-                    scores_buf.resize(seq_len);
-                }
-                float* scores = scores_buf.data();
-                float max_score = -std::numeric_limits<float>::infinity();
-                
-                for (int64_t j = 0; j < seq_len; ++j) {
-                    // Compute dot product: q[i] · k[j]
-                    const float* k_row = k_head + j * head_dim;
-                    float dot = 0.0f;
-                    for (int64_t d = 0; d < head_dim; ++d) {
-                        dot += q_row[d] * k_row[d];
+class StreamingBackward : public BackwardFunction {
+public:
+    StreamingBackward(TensorPtr q, TensorPtr k, TensorPtr v, TensorPtr mask,
+                      TensorPtr pad, float scale, bool causal)
+        : q_(q), k_(k), v_(v), mask_(mask), pad_(pad), scale_(scale), causal_(causal) {}
+    std::vector<TensorPtr> apply(const TensorPtr& go) override {
+        check_tensor(go);
+        if (go->shape() != q_->shape()) throw std::invalid_argument("streaming attention gradient shape mismatch");
+        auto dq = zeros(q_->shape()), dk = zeros(k_->shape()), dv = zeros(v_->shape());
+        const auto shape = q_->shape();
+        const int64_t S = shape[2], D = shape[3];
+        std::vector<float> p(S), dp(S);
+        for (int64_t b=0; b<shape[0]; ++b) for (int64_t h=0; h<shape[1]; ++h)
+            for (int64_t i=0; i<S; ++i) {
+                probabilities(q_,k_,mask_,pad_,scale_,causal_,b,h,i,p);
+                double dot = 0;
+                for (int64_t j=0; j<S; ++j) {
+                    dp[j] = 0;
+                    for (int64_t d=0; d<D; ++d) {
+                        const float g = go->data<float>()[offset(go,b,h,i,d)];
+                        dp[j] += g * v_->data<float>()[offset(v_,b,h,j,d)];
+                        dv->data<float>()[offset(dv,b,h,j,d)] += p[j]*g;
                     }
-                    
-                    // Apply scale
-                    float score = dot * scale;
-                    
-                    // Apply causal mask
-                    if (config.use_causal_mask && j > i) {
-                        score = -1e10f;  // Mask upper triangle
-                    }
-                    
-                    // Apply extra mask (if provided)
-                    if (mask_data) {
-                        score += mask_data[i * seq_len + j];
-                    }
-                    
-                    scores[j] = score; // Write into reusable buffer
-                    max_score = std::max(max_score, score);
+                    dot += static_cast<double>(p[j])*static_cast<double>(dp[j]);
                 }
-                
-                // === Pass 2: online softmax and accumulate into context ===
-                // Initialize output row
-                std::fill(ctx_row, ctx_row + head_dim, 0.0f);
-                
-                // Compute normalization denominator
-                double sum_exp = 0.0;
-                for (int64_t j = 0; j < seq_len; ++j) {
-                    sum_exp += std::exp(scores[j] - max_score);
-                }
-                
-                // Compute weighted sum
-                float inv_sum = 1.0f / static_cast<float>(sum_exp);
-                for (int64_t j = 0; j < seq_len; ++j) {
-                    float weight = std::exp(scores[j] - max_score) * inv_sum;
-                    const float* v_row = v_head + j * head_dim;
-                    
-                    for (int64_t d = 0; d < head_dim; ++d) {
-                        ctx_row[d] += weight * v_row[d];
+                for (int64_t j=0; j<S; ++j) {
+                    const float ds = (p[j]*(dp[j]-static_cast<float>(dot)))*scale_;
+                    for (int64_t d=0; d<D; ++d) {
+                        dq->data<float>()[offset(dq,b,h,i,d)] += ds*k_->data<float>()[offset(k_,b,h,j,d)];
+                        dk->data<float>()[offset(dk,b,h,j,d)] += ds*q_->data<float>()[offset(q_,b,h,i,d)];
                     }
                 }
             }
-        }
+        return {dq,dk,dv};
     }
-    
-    return context;
+private:
+    TensorPtr q_,k_,v_,mask_,pad_;
+    float scale_;
+    bool causal_;
+};
+} // namespace
+
+void online_softmax_weighted_sum(const float* logits, const float* values,
+        int64_t S, int64_t D, float* output, float maximum) {
+    double sum = 0;
+    for (int64_t j=0; j<S; ++j) sum += std::exp(logits[j]-maximum);
+    for (int64_t j=0; j<S; ++j) for (int64_t d=0; d<D; ++d)
+        output[d] += std::exp(logits[j]-maximum)/static_cast<float>(sum)*values[j*D+d];
 }
 
+TensorPtr memory_efficient_attention(const TensorPtr& q, const TensorPtr& k,
+        const TensorPtr& v, const TensorPtr& mask, const MemoryEfficientAttentionConfig& config) {
+    return memory_efficient_attention(q,k,v,mask,nullptr,config);
+}
+
+TensorPtr memory_efficient_attention(const TensorPtr& q, const TensorPtr& k,
+        const TensorPtr& v, const TensorPtr& mask, const TensorPtr& pad,
+        const MemoryEfficientAttentionConfig& config) {
+    check_tensor(q); check_tensor(k); check_tensor(v);
+    const auto shape = q->shape();
+    if (shape.size()!=4 || k->shape()!=shape || v->shape()!=shape ||
+        std::any_of(shape.begin(),shape.end(),[](int64_t d){return d<=0;}))
+        throw std::invalid_argument("streaming attention expects matching positive [B,H,S,D] shapes");
+    const int64_t B=shape[0], H=shape[1], S=shape[2], D=shape[3];
+    if (mask) {
+        check_tensor(mask);
+        if (mask->shape()!=std::vector<int64_t>{S,S} || mask->requires_grad())
+            throw std::invalid_argument("streaming attention mask must be a constant additive [S,S] tensor");
+    }
+    if (pad) {
+        check_tensor(pad);
+        if ((pad->shape()!=std::vector<int64_t>{B,S} && pad->shape()!=std::vector<int64_t>{B,1,1,S}) || pad->requires_grad())
+            throw std::invalid_argument("streaming attention padding must be constant additive [B,S] or [B,1,1,S]");
+    }
+    if (!std::isfinite(config.scale)) throw std::invalid_argument("streaming attention scale must be finite");
+    const float scale = config.scale>0 ? config.scale : 1/std::sqrt(static_cast<float>(D));
+    // As in the previous training path, an explicit mask replaces automatic causality.
+    const bool causal = !mask && config.use_causal_mask;
+#ifndef USE_NEW_AUTOGRAD_ENGINE
+    if (q->requires_grad() || k->requires_grad() || v->requires_grad()) {
+        auto scores=mul(matmul(q,transpose(k,2,3)),scale);
+        if (mask) scores=add(scores,mask);
+        else if (causal) scores=add(scores,create_causal_mask(static_cast<int>(S),kFloat32,kCPU));
+        if (pad) scores=add(scores,reshape(pad,{B,1,1,S}));
+        return matmul(softmax(scores,-1),v);
+    }
+#endif
+    auto out=zeros(shape);
+    std::vector<float> p(S);
+    for (int64_t b=0; b<B; ++b) for (int64_t h=0; h<H; ++h) for (int64_t i=0; i<S; ++i) {
+        probabilities(q,k,mask,pad,scale,causal,b,h,i,p);
+        for (int64_t j=0; j<S; ++j) for (int64_t d=0; d<D; ++d)
+            out->data<float>()[offset(out,b,h,i,d)] += p[j]*v->data<float>()[offset(v,b,h,j,d)];
+    }
+#ifdef USE_NEW_AUTOGRAD_ENGINE
+    if (q->requires_grad() || k->requires_grad() || v->requires_grad()) {
+        out->set_requires_grad(true);
+        autograd::Engine::instance().register_node(out,{q,k,v},
+            std::make_shared<StreamingBackward>(q,k,v,mask,pad,scale,causal));
+    }
+#endif
+    return out;
+}
 } // namespace ops

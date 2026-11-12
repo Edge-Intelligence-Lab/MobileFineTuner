@@ -2,6 +2,7 @@
 
 #include "../core/tensor.h"
 #include "../nn/lora_linear.h"
+#include "frozen_model_offload.h"
 
 #include <memory>
 #include <string>
@@ -96,6 +97,10 @@ public:
     std::vector<TensorPtr> get_lora_parameters() const;
     void merge_lora();
     void unmerge_lora();
+    void set_memory_efficient_attention(bool enabled);
+    void set_activation_checkpointing(bool enabled);
+    void enable_parameter_sharding(const sharding::ShardConfig& config);
+    sharding::ShardStats sharding_stats() const { return offload_ ? offload_->stats() : sharding::ShardStats{}; }
 
     void request_embedding_dump(int step, const std::string& output_dir);
     
@@ -117,6 +122,9 @@ private:
     TensorPtr lm_head_weight_;
     std::vector<GemmaBlockWeights> blocks_;
     bool lm_head_initialized_ = false;
+    bool memory_efficient_attention_ = false;
+    bool activation_checkpointing_ = false;
+    std::unique_ptr<FrozenModelOffload> offload_;
     EmbeddingDumpRequest dump_request_;
     
     struct DebugConfig {

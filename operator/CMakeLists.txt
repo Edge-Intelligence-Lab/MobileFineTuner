@@ -107,6 +107,8 @@ set(FINETUNE_SOURCES
     finetune_ops/core/utils.cpp
     finetune_ops/core/lm_loss.cpp
     finetune_ops/core/memory_efficient_attention.cpp
+    finetune_ops/core/checkpoint.cpp
+    finetune_ops/memory/parameter_sharder.cpp
     finetune_ops/core/performance_monitor.cpp
     finetune_ops/core/tokenizer.cpp
     
@@ -227,6 +229,10 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/energy
     FILES_MATCHING PATTERN "*.h"
 )
 
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/memory/parameter_sharder.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/finetune_ops/memory
+)
+
 install(DIRECTORY
     ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/core
     ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/data
@@ -306,6 +312,17 @@ install(FILES
 # ============================================================================
 if(BUILD_TESTS)
     enable_testing()
+
+    if(USE_NEW_AUTOGRAD_ENGINE)
+        add_executable(test_streaming_attention finetune_ops/core/test_streaming_attention.cpp)
+        target_link_libraries(test_streaming_attention PRIVATE operators)
+        add_test(NAME StreamingAttentionParity COMMAND test_streaming_attention)
+        foreach(memory_test activation_checkpoint parameter_offload model_memory_optimizations)
+            add_executable(test_${memory_test} finetune_ops/core/test_${memory_test}.cpp)
+            target_link_libraries(test_${memory_test} PRIVATE operators)
+            add_test(NAME ${memory_test} COMMAND test_${memory_test})
+        endforeach()
+    endif()
 
     add_executable(test_power_monitor finetune_ops/energy/test_power_monitor.cpp)
     target_link_libraries(test_power_monitor PRIVATE operators)
