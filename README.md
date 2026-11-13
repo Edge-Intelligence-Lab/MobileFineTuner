@@ -498,6 +498,22 @@ semantics. The default memory controls are explicit and easy to audit:
 - Android helper scripts can sample RSS and process telemetry during native
   training runs.
 
+### Q8_0 Quantized Base Weights
+
+The frozen LoRA base weights can be stored as 8-bit blocks instead of fp32.
+This takes the 48 linear layers of GPT-2 small from 324.0 MiB to 86.1 MiB and
+yields a self-contained 236.8 MiB checkpoint, with no measurable accuracy loss
+(see [docs/quantization/RESULTS.md](docs/quantization/RESULTS.md)):
+
+```bash
+--quantize q8_0                         # quantize the base weights at startup
+--quantize q8_0 --save_quantized m.q8   # also write an int8 checkpoint
+--load_quantized m.q8                   # load it directly (skips the fp32 file)
+```
+
+See [docs/quantization/README.md](docs/quantization/README.md) for the file
+format and known limitations.
+
 ### Gradient Accumulation
 
 Divide large batches into micro-batches to reduce activation memory:
