@@ -1028,14 +1028,21 @@ std::vector<std::string> QwenBPETokenizer::split_to_words(const std::string& tex
             }
 
             // \s+(?!\S)|\s+
+            size_t last_space = i;
             i += ch.len;
             while (i < text.size()) {
                 auto next = decode_utf8(text, i);
                 if (!is_whitespace_cp(next.cp)) {
                     break;
                 }
+                last_space = i;
                 i += next.len;
             }
+            // The negative lookahead alternative backtracks one whitespace
+            // before non-whitespace. That final character may be consumed as
+            // the prefix of the following word/punctuation token.
+            if (i < text.size() && last_space > start)
+                i = last_space;
             words.push_back(text.substr(start, i - start));
             continue;
         }

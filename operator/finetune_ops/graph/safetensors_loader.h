@@ -41,6 +41,8 @@ struct SafeTensorsLoadOptions {
     // when auto_promote_fp16 is true. Used for frozen base weights where
     // trainable grads and optimizer state remain FP32.
     std::vector<std::string> preserve_low_precision_key_substrings;
+    // Exact internal keys stored in row-major output/embedding layout [out,in].
+    std::vector<std::string> skip_transpose_keys;
 };
 
 /**
@@ -164,6 +166,8 @@ public:
      */
     static std::unordered_map<std::string, std::string>
     generate_qwen_mapping(int num_layers = 24);
+    static std::unordered_map<std::string, std::string>
+    generate_qwen_mapping(const struct QwenConfig& config);
 };
 
 }  // namespace ops

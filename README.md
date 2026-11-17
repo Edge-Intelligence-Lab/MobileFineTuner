@@ -38,15 +38,20 @@ If you find this project useful, please consider citing our paper.
 
 ## Overview
 
-MobileFineTuner is an open-source C++ framework for practical, privacy-preserving fine-tuning of Large Language Models (LLMs) on mobile-class devices. The current release candidate verifies the stable C++ core, package/export surface, local training entrypoints, and Android native synthetic smoke execution. Full-weight on-phone training requires externally supplied model weights and device-specific validation.
+MobileFineTuner is an open-source C++ framework for practical, privacy-preserving fine-tuning of Large Language Models (LLMs) on mobile-class devices. The current release candidate verifies the stable C++ core, package/export surface, local training entrypoints, and Android native/SDK builds. Full-weight on-phone training requires externally supplied model weights and device-specific validation.
 
 Unlike simulation-based or desktop-bound approaches, MobileFineTuner is built around a lean native C++ implementation that eliminates Python runtime overhead in the training path and supports both Full Fine-Tuning (Full-FT) and Parameter-Efficient Fine-Tuning (PEFT/LoRA) under tight resource constraints.
 
 ### Verified Scope
 
+- PR integration audit (2026-11-17): see [integration checks](docs/validation/PR_INTEGRATION_20261117.md) and the [Mac stability runner](docs/MAC_STABILITY.md). Final candidate long-run and physical-device results are tracked separately.
+
+- Mac regression (2026-11-14, Apple M2): see [validation notes](docs/validation/MACOS_20261114.md) for the tested revision, commands, results, and Android checks still pending.
+- Qwen3.5-0.8B pure-text LoRA (2026-11-15): see [hybrid attention validation](docs/validation/QWEN35_20261115.md) for official-weight forward/gradient checks, adapter interoperability, and Mac training.
+- Qwen2/Qwen3 dense adaptation (2026-11-15): see [numerical and training validation](docs/validation/QWEN_20261115.md) for Transformers/PEFT alignment and real Qwen3-0.6B LoRA checks.
 - Stable C++ operator/autograd/LoRA core with unit tests and installable CMake package.
 - Five local training smoke entrypoints: GPT-2 small, GPT-2 medium, Gemma 270M, Gemma 1B-PT, and Qwen.
-- Android native build/run path validated with a synthetic Qwen LoRA smoke test, including loss/backward/update and 5 ms RSS sampling.
+- Android SDK/AAR and native CLI builds pass; physical-device execution for this candidate remains pending.
 - Full pretrained weights, benchmark datasets, adapters, run logs, and phone QA media are external runtime artifacts and are not bundled in the source release.
 
 ### Key Features
@@ -54,7 +59,7 @@ Unlike simulation-based or desktop-bound approaches, MobileFineTuner is built ar
 - **Efficiency**: Pure C++ implementation with modular operators, automatic differentiation, and full backpropagation without Python runtime or external ML frameworks required
 - **Scalability**: Supports multiple mainstream decoder-only LLM architectures (GPT-2, Gemma, Qwen) with reusable graph, tokenizer, dataset, and LoRA components
 - **Usability**: Simple high-level APIs that abstract away system complexity, enabling rapid prototyping and practical deployment
-- **Privacy-Preserving**: All training data remains on-device, complying with GDPR and user privacy expectations
+- **Local Training**: The native training path processes model and dataset files locally without requiring a training upload service
 - **Resource-Aware**: Keeps model weights, datasets, run logs, adapters, and profiling output outside the source package; runtime scripts resolve assets through explicit environment variables
 
 ---
@@ -372,10 +377,26 @@ Detailed layout and download examples are documented in
 
 ### Gemma Family (Google)
 - **Gemma-3 270M**: Compact decoder-only transformer with Grouped Query Attention (GQA)
-- **Gemma-3 1B**: Scaled version with 18 layers, 2048 hidden dimensions
+- **Gemma-3 1B-PT**: 26 layers, 1152 hidden dimensions
 
 ### Qwen Family (Alibaba)
-- **Qwen2.5-0.5B**: Lightweight decoder-only transformer with rotary embeddings and QKV sharing
+- **Qwen2.5-0.5B**: Lightweight decoder-only transformer with rotary embeddings and Grouped Query Attention
+- **Qwen3-0.6B**: Dense text decoder with independent head dimensions and Q/K normalization
+- **Qwen3.5-0.8B (text only)**: Hybrid Gated DeltaNet and gated full attention decoder
+
+The Qwen graph dispatches on `qwen2`, `qwen3`, `qwen3_5_text`, or the text backbone
+of `qwen3_5`, and reads dimensions,
+attention biases, and tied/untied output heads from the model configuration.
+LoRA uses actual linear-layer shapes and exact target module names, including
+`all-linear`. Standard PEFT adapters can be saved and loaded. See
+[Qwen dense support and validation](docs/QWEN_DENSE_SUPPORT.md) for the tested
+scope, API, CLI flags, and independent Transformers/PEFT checks.
+
+Qwen3.5 support covers pure-text full-sequence LoRA with its default partial RoPE.
+Its vision encoder, image/video inputs, MoE variants, incremental state cache,
+activation checkpointing, and parameter offload are outside this implementation.
+MoE model types are rejected explicitly. Support for one Qwen architecture does not establish
+support for every Qwen-branded checkpoint or every optional attention/RoPE variant.
 
 ### Adding New Models
 
@@ -500,10 +521,15 @@ semantics. The default memory controls are explicit and easy to audit:
 
 ### Q8_0 Quantized Base Weights
 
-The frozen LoRA base weights can be stored as 8-bit blocks instead of fp32.
-This takes the 48 linear layers of GPT-2 small from 324.0 MiB to 86.1 MiB and
-yields a self-contained 236.8 MiB checkpoint, with no measurable accuracy loss
-(see [docs/quantization/RESULTS.md](docs/quantization/RESULTS.md)):
+The **GPT-2 small training CLI** can store the frozen LoRA base weights as 8-bit
+blocks instead of fp32. This takes its 48 linear layers from 324.0 MiB to 86.1 MiB
+and yields a self-contained 236.8 MiB checkpoint. Embeddings, normalization,
+biases, and trainable LoRA parameters remain fp32. Other model CLIs do not
+currently expose this complete Q8_0 workflow. See
+[docs/quantization/RESULTS.md](docs/quantization/RESULTS.md) for the original x86
+measurements and [Mac validation](docs/validation/MACOS_20261114.md) for short
+regression checks; these do not establish phone performance or general accuracy
+equivalence.
 
 ```bash
 --quantize q8_0                         # quantize the base weights at startup
@@ -514,16 +540,24 @@ yields a self-contained 236.8 MiB checkpoint, with no measurable accuracy loss
 See [docs/quantization/README.md](docs/quantization/README.md) for the file
 format and known limitations.
 
+Pass these flags directly to `examples/gpt2_small_lora_finetune/build/train`.
+The standalone `eval_ppl` binary does not accept `--quantize` or
+`--load_quantized`; quantized validation is available inside `train` via
+`--eval_interval`, `--eval_batches`, and `--eval_batch_size`.
+
 ### Gradient Accumulation
 
 Divide large batches into micro-batches to reduce activation memory:
 
 ```bash
---batch_size 8              # Effective batch size
---grad_accum_steps 4        # Accumulate over 4 micro-batches
+--batch_size 2              # Micro-batch size per forward/backward pass
+--grad_accum_steps 4        # Four micro-batches per optimizer update
 ```
 
-Result: Forward/backward runs on `batch_size / grad_accum_steps = 2` samples at a time, reducing peak activation memory by ~75% while maintaining gradient quality.
+Result: Each forward/backward pass processes 2 samples; four passes produce an
+effective batch of `batch_size * grad_accum_steps = 8` samples per optimizer
+update. This reduces per-pass activation memory compared with processing all
+8 samples together; actual peak memory depends on the model and sequence length.
 
 ---
 

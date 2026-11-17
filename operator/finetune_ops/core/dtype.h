@@ -96,7 +96,9 @@ inline float fp16_bits_to_float32(uint16_t value) {
                 --exponent;
             }
             mantissa &= 0x3FFu;
-            exponent = exponent - 1 + 127 - 15;
+            // exponent already tracks the leading-one normalization shifts.
+            // Subtracting one again halves every nonzero FP16 subnormal.
+            exponent = exponent + 127 - 15;
             bits = sign | (exponent << 23) | (mantissa << 13);
         }
     } else if (exponent == 0x1F) {

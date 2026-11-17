@@ -77,7 +77,7 @@ not full-size Qwen/PIQA accuracy evaluation or proof of cross-engine parity.
 
 Previous end-to-end timing figures from a different local tensor/view implementation
 must not be attributed to this dense upstream implementation. No end-to-end speedup,
-mobile/Termux result, RSS improvement, or PyTorch/ORT parity is claimed by this PR.
+mobile runtime result, RSS improvement, or parity with other ML runtimes is claimed by this PR.
 
 GitHub source archives at the tested base exclude nested `data/` directories due to
 an existing export-ignore rule. Use a full checkout, rather than those archives,

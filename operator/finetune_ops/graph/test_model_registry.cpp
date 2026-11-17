@@ -1,4 +1,5 @@
 #include "model_registry.h"
+#include "qwen_model.h"
 
 #include <filesystem>
 #include <fstream>
@@ -92,6 +93,29 @@ void test_unknown_model_type() {
     require(threw, "unknown model_type did not throw");
 }
 
+void test_unsupported_qwen_architectures() {
+    for (const std::string model_type : {"qwen3_5_moe", "qwen2_moe", "qwen3_moe"}) {
+        const fs::path root = make_case_dir("unsupported_" + model_type);
+        write_file(root / "config.json", "{\"model_type\":\"" + model_type + "\"}");
+        bool registry_rejected = false;
+        bool graph_rejected = false;
+        try {
+            (void)ops::ModelRegistry::inspect_pretrained(root.string());
+        } catch (const std::exception& error) {
+            registry_rejected =
+                std::string(error.what()).find("Unsupported Qwen model_type") != std::string::npos;
+        }
+        try {
+            (void)ops::QwenConfig::from_pretrained((root / "config.json").string());
+        } catch (const std::exception& error) {
+            graph_rejected =
+                std::string(error.what()).find("Unsupported Qwen model_type") != std::string::npos;
+        }
+        require(registry_rejected, "registry dispatched an unsupported Qwen architecture");
+        require(graph_rejected, "Qwen2 graph accepted an unsupported Qwen architecture");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -99,5 +123,6 @@ int main() {
     test_gpt2_registry_defaults();
     test_gemma_registry_defaults_match_training_path();
     test_unknown_model_type();
+    test_unsupported_qwen_architectures();
     return 0;
 }

@@ -60,11 +60,19 @@ Every model snapshot must include `config.json` with a supported HuggingFace
 ```text
 gpt2      -> GPT-2 graph + GPT-2 byte-level BPE tokenizer
 gemma*    -> Gemma graph + Gemma tokenizer
-qwen*     -> Qwen graph + Qwen byte-level BPE tokenizer
+qwen2     -> Qwen dense graph + Qwen byte-level BPE tokenizer
+qwen3     -> Qwen dense graph with Q/K norm + Qwen byte-level BPE tokenizer
+qwen3_5_text / qwen3_5 -> Qwen hybrid text backbone + Qwen byte-level BPE tokenizer
 ```
 
 Do not infer the model family from `tokenizer.json` alone. Different model
 families reuse that filename with incompatible tokenization rules.
+
+Qwen3.5 uses per-layer hybrid attention dispatch; a full `qwen3_5` snapshot loads
+only its text backbone. Vision/image/video inputs and MoE are unsupported. Qwen checkpoint
+loading requires every tensor selected by the architecture, including Q/K norms
+and an independent `lm_head.weight` when embeddings are untied. Missing tensors
+and incorrect shapes are errors. See [Qwen support](QWEN_DENSE_SUPPORT.md).
 
 The runner scripts also accept per-model overrides:
 

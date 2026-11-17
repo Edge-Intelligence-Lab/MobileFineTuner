@@ -63,6 +63,16 @@ The current Auto APIs cover the shared causal-LM/LoRA training core. Specialized
 dataset loops, logging, checkpoint schedules, and model-specific diagnostics can
 still use the lower-level graph classes directly.
 
+For Qwen2/Qwen3 dense and Qwen3.5 hybrid text models, `AutoLoraConfig::target_modules` selects exact
+linear module suffixes (`q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`,
+`up_proj`, `down_proj`) or `all-linear`. Shapes come from the actual model
+matrices. Unknown or duplicate targets are rejected. The Qwen graph exposes
+`save_lora_adapter(directory)`, `load_lora_adapter(directory)`, and
+`set_training(bool)` through `model->qwen()`; see [Qwen support](QWEN_DENSE_SUPPORT.md)
+for the standard PEFT checkpoint contract and supported options.
+Qwen3.5 additionally exposes `in_proj_qkv`, `in_proj_z`, `in_proj_a`,
+`in_proj_b`, and `out_proj` on linear-attention layers.
+
 ## Opt-in Energy-Aware Throttling
 
 `ops::energy::PowerMonitor` is a model-independent scheduler exposed by the same
@@ -90,3 +100,21 @@ The Android API also exposes `MobileFineTuner.selfTest(File workingDir)`, which
 runs a tiny synthetic native LoRA training step on device. This is intended for
 installation validation and CI/device smoke testing; real applications should
 still pass their own HuggingFace-style `modelDir` to `MobileFineTuner.open`.
+
+## Training lifetime and concurrency
+
+Initialize LoRA before constructing `AutoTrainer`; repeated Auto LoRA
+initialization is rejected to avoid stale optimizer parameter references. Keep
+the model alive for the trainer's lifetime. Seed and adapter-branch dropout are
+bound by the GPT-2, Gemma and Qwen injectors. Gemma/Qwen checkpointed training
+requires zero LoRA dropout because stochastic recomputation is unsupported.
+A zero `max_grad_norm` disables clipping; non-finite loss/gradients reject the
+step and clear the graph and gradients. This is not a transactional rollback
+of an optimizer failure after updates have begun.
+
+The autograd engine is process-wide: C++ callers must serialize training and
+other graph-affecting calls across model instances. The Android JNI bridge
+serializes native entrypoints across sessions; Java instance operations also
+synchronize close with active calls. Run training on a worker thread because
+close can wait for an active step. Device concurrency tests are included in the
+instrumentation suite and require a connected device to execute.

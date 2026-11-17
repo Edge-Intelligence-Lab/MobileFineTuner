@@ -1,4 +1,6 @@
 #include "model_registry.h"
+#include "../../third_party/nlohmann/json.hpp"
+#include "qwen_model.h"
 
 #include <algorithm>
 #include <cctype>
@@ -29,41 +31,27 @@ std::string read_file(const fs::path& path) {
 }
 
 std::string lowercase(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return value;
-}
-
-std::string extract_json_string(const std::string& content, const std::string& key) {
-    const std::regex pattern("\"" + key + "\"\\s*:\\s*\"([^\"]+)\"");
-    std::smatch match;
-    if (std::regex_search(content, match, pattern)) {
-        return match[1].str();
-    }
-    return "";
-}
-
-bool extract_json_bool(const std::string& content, const std::string& key, bool fallback) {
-    const std::regex pattern("\"" + key + "\"\\s*:\\s*(true|false)");
-    std::smatch match;
-    if (std::regex_search(content, match, pattern)) {
-        return match[1].str() == "true";
-    }
-    return fallback;
 }
 
 ops::ModelFamily family_from_model_type(const std::string& model_type) {
     const std::string normalized = lowercase(model_type);
-    if (normalized.find("qwen") != std::string::npos) {
+    if (normalized == "qwen2" || normalized == "qwen3" || normalized == "qwen3_5" ||
+        normalized == "qwen3_5_text") {
         return ops::ModelFamily::Qwen;
+    }
+    if (normalized.find("qwen") != std::string::npos) {
+        throw std::runtime_error(
+            "Unsupported Qwen model_type: " + model_type +
+            ". Supported text architectures: qwen2, qwen3, qwen3_5 and qwen3_5_text.");
     }
     if (normalized.find("gemma") != std::string::npos) {
         return ops::ModelFamily::Gemma;
     }
     if (normalized.find("gpt2") != std::string::npos ||
-        normalized.find("gpt_2") != std::string::npos ||
-        normalized == "gpt") {
+        normalized.find("gpt_2") != std::string::npos || normalized == "gpt") {
         return ops::ModelFamily::GPT2;
     }
     return ops::ModelFamily::Unknown;
@@ -71,29 +59,32 @@ ops::ModelFamily family_from_model_type(const std::string& model_type) {
 
 std::vector<std::string> default_lora_targets(ops::ModelFamily family) {
     switch (family) {
-        case ops::ModelFamily::Qwen:
-            return {"q_proj", "k_proj", "v_proj", "o_proj"};
-        case ops::ModelFamily::Gemma:
-            return {"q_proj", "k_proj", "v_proj", "o_proj",
-                    "gate_proj", "up_proj", "down_proj"};
-        case ops::ModelFamily::GPT2:
-            return {"attn_qkv", "attn_proj"};
-        case ops::ModelFamily::Unknown:
-            return {};
+    case ops::ModelFamily::Qwen:
+        return {"q_proj", "k_proj", "v_proj", "o_proj"};
+    case ops::ModelFamily::Gemma:
+        return {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"};
+    case ops::ModelFamily::GPT2:
+        return {"attn_qkv", "attn_proj"};
+    case ops::ModelFamily::Unknown:
+        return {};
     }
     return {};
 }
 
-}  // namespace
+} // namespace
 
 namespace ops {
 
 std::string to_string(ModelFamily family) {
     switch (family) {
-        case ModelFamily::GPT2: return "gpt2";
-        case ModelFamily::Gemma: return "gemma";
-        case ModelFamily::Qwen: return "qwen";
-        case ModelFamily::Unknown: return "unknown";
+    case ModelFamily::GPT2:
+        return "gpt2";
+    case ModelFamily::Gemma:
+        return "gemma";
+    case ModelFamily::Qwen:
+        return "qwen";
+    case ModelFamily::Unknown:
+        return "unknown";
     }
     return "unknown";
 }
@@ -110,7 +101,8 @@ ModelArchitectureSpec ModelRegistry::inspect_pretrained(const std::string& model
     }
 
     const std::string config = read_file(config_path);
-    const std::string model_type = extract_json_string(config, "model_type");
+    const auto parsed = nlohmann::json::parse(config);
+    const std::string model_type = parsed.value("model_type", std::string());
     const ModelFamily family = family_from_model_type(model_type);
     if (family == ModelFamily::Unknown) {
         throw std::runtime_error("Unsupported model_type in config.json: " + model_type);
@@ -119,11 +111,14 @@ ModelArchitectureSpec ModelRegistry::inspect_pretrained(const std::string& model
     ModelArchitectureSpec spec;
     spec.family = family;
     spec.model_type = model_type;
-    spec.tie_word_embeddings = extract_json_bool(
-        config,
-        "tie_word_embeddings",
-        family == ModelFamily::GPT2);
+    spec.tie_word_embeddings = parsed.value("tie_word_embeddings", family == ModelFamily::GPT2);
     spec.default_lora_targets = default_lora_targets(family);
+
+    if (model_type == "qwen3_5" || model_type == "qwen3_5_text") {
+        const auto config = QwenConfig::from_pretrained(model_dir);
+        spec.default_lora_targets = config.default_lora_targets();
+        spec.tie_word_embeddings = config.tie_word_embeddings;
+    }
 
     auto& assets = spec.assets;
     assets.model_dir = model_dir;
@@ -143,4 +138,4 @@ ModelArchitectureSpec ModelRegistry::inspect_pretrained(const std::string& model
     return spec;
 }
 
-}  // namespace ops
+} // namespace ops

@@ -1,11 +1,17 @@
-#include <iostream>
-#include <string>
-#include <vector>
+#include "qwen_training_utils.h"
 #include <chrono>
-#include <iomanip>
-#include <fstream>
-#include <sstream>
+#include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
+#ifndef __APPLE__
+#include <unistd.h>
+#endif
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -58,6 +64,8 @@ struct Args {
     int lora_r = 8;
     float lora_alpha = 16.0f;
     float lora_dropout = 0.0f;  // MMLU finetune typically keeps dropout off
+    std::string lora_targets;
+    std::string resume_from;
     bool qv_only = true;        // attach LoRA on q and v only
     uint64_t seed = 42;
     int log_interval = 10;
@@ -128,6 +136,10 @@ static void parse_args(int argc, char** argv, Args& args) {
         else if (k == "--lora_r") args.lora_r = get_int();
         else if (k == "--lora_alpha") args.lora_alpha = get_float();
         else if (k == "--lora_dropout") args.lora_dropout = get_float();
+        else if (k == "--lora_targets")
+            args.lora_targets = get_str();
+        else if (k == "--resume_from")
+            args.resume_from = get_str();
         else if (k == "--qv_only") args.qv_only = true;
         else if (k == "--qkvo") args.qv_only = false;
         else if (k == "--seed") args.seed = static_cast<uint64_t>(std::stoull(get_str()));
@@ -140,27 +152,17 @@ static void parse_args(int argc, char** argv, Args& args) {
         else if (k == "--memory_efficient_attention") args.memory_efficient_attention = true;
         else if (k == "--offload_dir") args.offload_dir = get_str();
         else if (k == "--offload_resident_mb") args.offload_resident_mb = get_int();
+        else
+            throw std::invalid_argument("Unknown argument: " + k);
     }
 }
 
-static void configure_qwen_base_weight_storage(SafeTensorsLoadOptions& opts,
-                                               const std::string& policy) {
-    if (policy == "fp32") {
-        return;
-    }
-    if (policy != "auto" && policy != "native") {
-        throw std::runtime_error("--base_weight_storage must be one of: auto, native, fp32");
-    }
-    opts.preserve_low_precision_key_substrings = {
-        "embed_tokens.weight",
-        "self_attn.q_proj.weight",
-        "self_attn.k_proj.weight",
-        "self_attn.v_proj.weight",
-        "self_attn.o_proj.weight",
-        "mlp.gate_proj.weight",
-        "mlp.up_proj.weight",
-        "mlp.down_proj.weight"
-    };
+static std::string describe_targets(const Args& args) {
+    if (!args.resume_from.empty())
+        return "from adapter: " + args.resume_from;
+    if (!args.lora_targets.empty())
+        return args.lora_targets;
+    return args.qv_only ? "q_proj,v_proj" : "architecture default attention mixers";
 }
 
 void print_config(const Args& args) {
@@ -175,7 +177,7 @@ void print_config(const Args& args) {
     std::cout << "Learning rate: " << args.lr << "\n";
     std::cout << "LoRA rank: " << args.lora_r << "\n";
     std::cout << "LoRA alpha: " << args.lora_alpha << "\n";
-    std::cout << "LoRA targets: " << (args.qv_only ? "q, v only" : "q, k, v, o") << "\n";
+    std::cout << "LoRA targets: " << describe_targets(args) << "\n";
     std::cout << "Seed: " << args.seed << "\n";
     std::cout << "Base weight storage: " << args.base_weight_storage << "\n";
     std::cout << "================================================\n\n";
@@ -183,8 +185,19 @@ void print_config(const Args& args) {
 
 int main(int argc, char** argv) {
     Args args;
-    parse_args(argc, argv, args);
-    
+    try {
+        parse_args(argc, argv, args);
+        if (args.seq_len < 2 || args.batch_size <= 0 || args.grad_accum_steps <= 0 ||
+            args.max_steps <= 0)
+            throw std::invalid_argument(
+                "seq_len must be >=2; batch_size, grad_accum_steps and max_steps must be positive");
+        if (!std::isfinite(args.lr) || args.lr < 0)
+            throw std::invalid_argument("lr must be finite and nonnegative");
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] " << e.what() << std::endl;
+        return 1;
+    }
+
     // 设置默认日志文件
     if (args.log_file.empty()) {
         auto now = std::chrono::system_clock::now();
@@ -211,7 +224,7 @@ int main(int argc, char** argv) {
     log << "Learning rate: " << args.lr << "\n";
     log << "LoRA rank: " << args.lora_r << "\n";
     log << "LoRA alpha: " << args.lora_alpha << "\n";
-    log << "LoRA targets: " << (args.qv_only ? "q, v only" : "q, k, v, o") << "\n";
+    log << "LoRA targets: " << describe_targets(args) << "\n";
     log << "Log file: " << args.log_file << "\n";
     log << "Output dir: " << args.output_dir << "\n";
     log << "================================================\n\n";
@@ -237,32 +250,34 @@ int main(int argc, char** argv) {
         
         // 3) Load weights
         log << "[3/6] Loading model weights...\n";
-        SafeTensorsModelReader reader(args.model_dir);
-        reader.parse_headers();
-        auto mapping = QwenKeyMapper::generate_qwen_mapping(qcfg.num_hidden_layers);
         SafeTensorsLoadOptions load_opts;
         load_opts.verbose = false;
         load_opts.transpose_linear = true;
         configure_qwen_base_weight_storage(load_opts, args.base_weight_storage);
-        auto tensors = reader.load_tensors_mapped(mapping, load_opts);
-        for (auto& kv : tensors) {
-            model.assign_weight(kv.first, kv.second);
-        }
-        // Release constructor placeholder tensors that were replaced by real
-        // safetensors before any training allocations begin.
+        model.load_pretrained(args.model_dir, load_opts);
         MemoryManager::instance().clear_unused_memory();
-        
-        double after_load_rss = get_rss_mb();
-        log << "[After model load] RSS: " << std::fixed << std::setprecision(1) << after_load_rss << " MB\n";
-        
-        // 4) LoRA init (qv_only=true)
-        log << "[4/6] Initializing LoRA (q/v only)...\n";
-        model.init_lora(args.lora_r, args.lora_alpha, args.lora_dropout, args.qv_only, args.seed);
+
+        // 4) LoRA init / adapter resume
+        log << "[4/6] Initializing LoRA...\n";
+        if (!args.resume_from.empty())
+            model.load_lora_adapter(args.resume_from);
+        else if (!args.lora_targets.empty()) {
+            model.init_lora(args.lora_r, args.lora_alpha, args.lora_dropout,
+                            parse_qwen_lora_targets(args.lora_targets), args.seed);
+        } else
+            model.init_lora(args.lora_r, args.lora_alpha, args.lora_dropout, args.qv_only,
+                            args.seed);
+        args.lora_r = model.lora_rank();
+        args.lora_alpha = model.lora_alpha();
+        args.lora_dropout = model.lora_dropout();
+        log << "[LoRA] Actual targets:";
+        for (const auto& target : model.lora_targets())
+            log << " " << target;
+        log << "\n";
         model.freeze_base();
         model.set_memory_efficient_attention(args.memory_efficient_attention);
         model.set_activation_checkpointing(args.activation_checkpointing);
         if (!args.offload_dir.empty()) {
-            tensors.clear(); // Release loader aliases before relinquishing model ownership.
             sharding::ShardConfig offload;
             offload.offload_dir = args.offload_dir;
             offload.max_resident_bytes = static_cast<size_t>(args.offload_resident_mb) * 1024 * 1024;
@@ -288,6 +303,8 @@ int main(int argc, char** argv) {
         
         MMLUDataset ds(dcfg, &tokenizer);
         ds.load_train();
+        if (ds.num_samples() == 0)
+            throw std::runtime_error("Training dataset contains no samples");
         ds.shuffle();
         ds.print_stats();
         
@@ -341,6 +358,8 @@ int main(int argc, char** argv) {
             for (int64_t i = 0; i < batch.labels->numel(); ++i) {
                 if (labels_ptr[i] != -100) valid_tokens++;
             }
+            if (valid_tokens == 0)
+                throw std::runtime_error("MMLU batch has no answer tokens; increase --seq_len so answers survive truncation");
             total_tokens += valid_tokens;
             
             // Backward
@@ -452,7 +471,9 @@ int main(int argc, char** argv) {
                 log << "⚠️ Failed to save weights\n";
             }
         }
-        
+
+        if (args.save_weights)
+            model.save_lora_adapter(args.output_dir);
         log << "\n✅ MMLU LoRA Finetune finished successfully!\n";
         log.flush();
         

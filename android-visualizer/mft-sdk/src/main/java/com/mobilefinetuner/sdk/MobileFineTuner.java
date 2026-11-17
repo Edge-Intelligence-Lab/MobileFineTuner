@@ -9,6 +9,9 @@ import java.util.Arrays;
  * <p>The SDK owns one native MF session at a time: model, optional LoRA
  * adapters, and an optimizer-backed trainer. Model weights are supplied by the
  * application as files on device storage; they are not bundled in the AAR.</p>
+ * <p>Instance operations are synchronized and the native runtime serializes
+ * sessions. Training and close() can block; invoke them on a background worker.
+ * close() waits for an in-flight operation on this instance to finish.</p>
  */
 public final class MobileFineTuner implements AutoCloseable {
     static {
@@ -47,7 +50,7 @@ public final class MobileFineTuner implements AutoCloseable {
         return new MobileFineTuner(nativeCreate(modelDir, loadWeights));
     }
 
-    public void initLora(LoraConfig config) {
+    public synchronized void initLora(LoraConfig config) {
         if (config == null) {
             throw new IllegalArgumentException("config must not be null");
         }
@@ -61,7 +64,7 @@ public final class MobileFineTuner implements AutoCloseable {
         );
     }
 
-    public void createTrainer(TrainerConfig config) {
+    public synchronized void createTrainer(TrainerConfig config) {
         if (config == null) {
             throw new IllegalArgumentException("config must not be null");
         }
@@ -74,7 +77,7 @@ public final class MobileFineTuner implements AutoCloseable {
         );
     }
 
-    public TrainStepResult trainStep(
+    public synchronized TrainStepResult trainStep(
             int[] inputIds,
             float[] attentionMask,
             int[] labels,
@@ -100,12 +103,12 @@ public final class MobileFineTuner implements AutoCloseable {
         return new TrainStepResult((float) result[0], (int) result[1]);
     }
 
-    public int trainableTensorCount() {
+    public synchronized int trainableTensorCount() {
         return nativeTrainableTensorCount(requireOpen());
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         long handle = nativeHandle;
         nativeHandle = 0L;
         if (handle != 0L) {

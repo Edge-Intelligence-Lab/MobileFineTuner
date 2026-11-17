@@ -1,12 +1,16 @@
-#include <iostream>
-#include <string>
-#include <vector>
+#include "qwen_training_utils.h"
+#include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <chrono>
 #include <iomanip>
-#include <cstdint>
+#include <iostream>
+#include <sstream>
+#include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "finetune_ops/core/tokenizer_bpe.h"
 #include "finetune_ops/core/lm_loss.h"
@@ -36,10 +40,14 @@ struct Args {
     int lora_r = 8;
     float lora_alpha = 16.0f;
     float lora_dropout = 0.05f;
+    std::string lora_targets;
+    std::string resume_from;
     bool qv_only = false; // default q/k/v/o, matching QwenModel and formal QNLI experiments
     bool shuffle_train = true;
     uint64_t seed = 42;
     std::string loss_impl = "auto"; // auto: selected for masked JSONL, dense otherwise; full_dense/full_streaming: full-token JSONL labels
+    bool stability_checks = false;
+    int save_every = 0;      // adapter snapshots; optimizer state is not persisted
     bool align_mode = false; // alignment mode: single step with loss print
     bool synthetic_smoke = false;
     int smoke_steps = 2;
@@ -72,11 +80,19 @@ static void parse_args(int argc, char** argv, Args& args) {
         else if (k == "--lora_r") args.lora_r = std::stoi(get("--lora_r"));
         else if (k == "--lora_alpha") args.lora_alpha = std::stof(get("--lora_alpha"));
         else if (k == "--lora_dropout") args.lora_dropout = std::stof(get("--lora_dropout"));
+        else if (k == "--lora_targets")
+            args.lora_targets = get("--lora_targets");
+        else if (k == "--resume_from")
+            args.resume_from = get("--resume_from");
         else if (k == "--qv_only") args.qv_only = true;
         else if (k == "--qkvo") args.qv_only = false;
         else if (k == "--seed") args.seed = static_cast<uint64_t>(std::stoull(get("--seed")));
         else if (k == "--no_shuffle") args.shuffle_train = false;
         else if (k == "--loss_impl") args.loss_impl = get("--loss_impl");
+        else if (k == "--stability_checks")
+            args.stability_checks = true;
+        else if (k == "--save_every")
+            args.save_every = std::stoi(get("--save_every"));
         else if (k == "--align_mode") args.align_mode = true;
         else if (k == "--synthetic_smoke") args.synthetic_smoke = true;
         else if (k == "--smoke_steps") args.smoke_steps = std::stoi(get("--smoke_steps"));
@@ -85,6 +101,8 @@ static void parse_args(int argc, char** argv, Args& args) {
         else if (k == "--dump_only") args.dump_only = true;
         else if (k == "--base_weight_storage") args.base_weight_storage = get("--base_weight_storage");
         else if (k == "--pm_schedule") args.pm_schedule = get("--pm_schedule");
+        else
+            throw std::invalid_argument("Unknown argument: " + k);
     }
 }
 
@@ -113,29 +131,6 @@ static void require_file(const std::string& path, const std::string& desc) {
     }
 }
 
-static void configure_qwen_base_weight_storage(SafeTensorsLoadOptions& opts,
-                                               const std::string& policy) {
-    if (policy == "fp32") {
-        return;
-    }
-    if (policy != "auto" && policy != "native") {
-        throw std::runtime_error("--base_weight_storage must be one of: auto, native, fp32");
-    }
-
-    // Keep only large frozen matrices in their checkpoint dtype. Norms and
-    // biases stay FP32 because their kernels intentionally remain FP32.
-    opts.preserve_low_precision_key_substrings = {
-        "embed_tokens.weight",
-        "self_attn.q_proj.weight",
-        "self_attn.k_proj.weight",
-        "self_attn.v_proj.weight",
-        "self_attn.o_proj.weight",
-        "mlp.gate_proj.weight",
-        "mlp.up_proj.weight",
-        "mlp.down_proj.weight"
-    };
-}
-
 static void save_lora_weights_bin(const std::string& output_dir, const std::vector<TensorPtr>& params) {
     std::filesystem::create_directories(output_dir);
     const std::string path = output_dir + "/lora_weights.bin";
@@ -155,6 +150,31 @@ static void save_lora_weights_bin(const std::string& output_dir, const std::vect
         const int64_t numel = param->numel();
         out.write(reinterpret_cast<const char*>(param->data<float>()), numel * sizeof(float));
     }
+}
+
+struct StabilityStats {
+    double l2 = 0.0, max_abs = 0.0;
+    int64_t elements = 0;
+};
+
+static StabilityStats measure_finite(const std::vector<TensorPtr>& values, const char* kind) {
+    StabilityStats stats;
+    double square_sum = 0.0;
+    for (const auto& tensor : values) {
+        if (!tensor || tensor->dtype() != kFloat32)
+            throw std::runtime_error(std::string("Missing or non-FP32 ") + kind);
+        const float* data = tensor->data<float>();
+        for (int64_t i = 0; i < tensor->numel(); ++i) {
+            const double value = data[i];
+            if (!std::isfinite(value))
+                throw std::runtime_error(std::string("Non-finite ") + kind);
+            square_sum += value * value;
+            stats.max_abs = std::max(stats.max_abs, std::abs(value));
+        }
+        stats.elements += tensor->numel();
+    }
+    stats.l2 = std::sqrt(square_sum);
+    return stats;
 }
 
 static void dump_batch_json(const Batch& batch, const std::string& path) {
@@ -248,7 +268,8 @@ static int run_synthetic_smoke(const Args& args, energy::PowerMonitor& power_mon
     for (int step = 0; step < smoke_steps; ++step) {
         const auto step_start = std::chrono::steady_clock::now();
         auto hidden = model.forward_hidden(input_ids, attention_mask);
-        auto loss = selected_token_lm_cross_entropy(hidden, model.embedding_weight(), labels, -100, "mean");
+        auto loss =
+            selected_token_lm_cross_entropy(hidden, model.output_weight(), labels, -100, "mean");
         if (!smoke::is_finite_scalar(loss)) {
             throw std::runtime_error("non-finite loss during Qwen synthetic smoke");
         }
@@ -277,6 +298,7 @@ static int run_synthetic_smoke(const Args& args, energy::PowerMonitor& power_mon
 
     double param_delta = smoke::max_param_delta(before, lora_params);
     save_lora_weights_bin(args.output_dir, lora_params);
+    model.save_lora_adapter(args.output_dir);
     std::cout << "[SyntheticSmoke] param_delta=" << param_delta << std::endl;
     const bool ok = std::isfinite(param_delta) && param_delta > 0.0;
     std::cout << (ok ? "[PASS]" : "[FAIL]") << std::endl;
@@ -287,6 +309,14 @@ int main(int argc, char** argv) {
     Args args;
     try {
         parse_args(argc, argv, args);
+        if (args.seq_len < 2 || args.batch_size <= 0 || args.grad_accum_steps <= 0)
+            throw std::invalid_argument(
+                "seq_len must be >=2; batch_size and grad_accum_steps must be positive");
+        if (!std::isfinite(args.lr) || args.lr < 0 || !std::isfinite(args.max_grad_norm) ||
+            args.max_grad_norm < 0)
+            throw std::invalid_argument("lr and max_grad_norm must be finite and nonnegative");
+        if (args.save_every < 0)
+            throw std::invalid_argument("--save_every must be nonnegative");
         energy::PowerMonitor power_monitor;
         power_monitor.set_step_schedule(energy::PowerMonitor::parse_schedule(args.pm_schedule));
         if (args.synthetic_smoke) {
@@ -322,6 +352,14 @@ int main(int argc, char** argv) {
             throw std::runtime_error("failed to open metrics file in output_dir");
         }
         metrics << "step,loss,step_time_s,elapsed_s\n";
+        std::ofstream stability_metrics;
+        if (args.stability_checks) {
+            stability_metrics.open(args.output_dir + "/stability_metrics.csv");
+            if (!stability_metrics)
+                throw std::runtime_error("Cannot open stability metrics");
+            stability_metrics << "step,grad_l2_before_clip,grad_l2_after_clip,grad_max_abs,"
+                                 "parameter_l2,parameter_max_abs,trainable_elements\n";
+        }
         std::ofstream energy_metrics;
         if (!args.pm_schedule.empty()) {
             energy_metrics.open(args.output_dir + "/energy_metrics.csv");
@@ -331,9 +369,8 @@ int main(int argc, char** argv) {
                       << "; no automatic sensor polling or energy measurement\n";
         }
 
-        std::cout << "\n========== Qwen2.5-0.5B LoRA Finetune ("
-                  << (use_jsonl ? "masked JSONL" : "WikiText-2")
-                  << ", C++) ==========\n";
+        std::cout << "\n========== Qwen text LoRA Finetune ("
+                  << (use_jsonl ? "masked JSONL" : "WikiText-2") << ", C++) ==========\n";
         // 1) tokenizer
         auto tok_cfg = QwenTokenizerConfig::from_pretrained(args.model_dir);
         QwenBPETokenizer tokenizer(tok_cfg);
@@ -344,21 +381,25 @@ int main(int argc, char** argv) {
         QwenModel model(qcfg);
 
         // 3) load weights
-        SafeTensorsModelReader reader(args.model_dir);
-        reader.parse_headers();
-        auto mapping = QwenKeyMapper::generate_qwen_mapping(qcfg.num_hidden_layers);
         SafeTensorsLoadOptions load_opts;
         load_opts.verbose = false;           // disable per-tensor log to avoid flooding
         load_opts.transpose_linear = true;   // HF Linear [out,in] -> internal [in,out]
         configure_qwen_base_weight_storage(load_opts, args.base_weight_storage);
-        auto tensors = reader.load_tensors_mapped(mapping, load_opts);
-        for (auto& kv : tensors) model.assign_weight(kv.first, kv.second);
-        // QwenModel constructs placeholder tensors before real safetensors are
-        // assigned. Release those replaced blocks before the first training step.
+        model.load_pretrained(args.model_dir, load_opts);
         MemoryManager::instance().clear_unused_memory();
 
         // 4) LoRA init
-        model.init_lora(args.lora_r, args.lora_alpha, args.lora_dropout, args.qv_only, args.seed);
+        if (!args.resume_from.empty())
+            model.load_lora_adapter(args.resume_from);
+        else if (!args.lora_targets.empty()) {
+            model.init_lora(args.lora_r, args.lora_alpha, args.lora_dropout,
+                            parse_qwen_lora_targets(args.lora_targets), args.seed);
+        } else
+            model.init_lora(args.lora_r, args.lora_alpha, args.lora_dropout, args.qv_only,
+                            args.seed);
+        args.lora_r = model.lora_rank();
+        args.lora_alpha = model.lora_alpha();
+        args.lora_dropout = model.lora_dropout();
         model.freeze_base();
         auto lora_params = model.get_lora_parameters();
 
@@ -394,6 +435,8 @@ int main(int argc, char** argv) {
         
         // Print dataset info and derive steps per epoch
         size_t num_seqs = ds.num_sequences();
+        if (num_seqs == 0)
+            throw std::runtime_error("Training dataset contains no usable sequences");
         size_t total_micro_batches = (num_seqs + args.batch_size - 1) / args.batch_size;
         size_t steps_per_epoch = (total_micro_batches + args.grad_accum_steps - 1) / args.grad_accum_steps;
         
@@ -402,7 +445,10 @@ int main(int argc, char** argv) {
         std::cout << "[Config] Grad accum steps: " << args.grad_accum_steps << std::endl;
         std::cout << "[Config] Effective batch size: " << args.batch_size * args.grad_accum_steps << std::endl;
         std::cout << "[Config] Max grad norm: " << args.max_grad_norm << std::endl;
-        std::cout << "[Config] LoRA targets: " << (args.qv_only ? "q,v" : "q,k,v,o") << std::endl;
+        std::cout << "[Config] LoRA targets:";
+        for (const auto& target : model.lora_targets())
+            std::cout << ' ' << target;
+        std::cout << std::endl;
         std::cout << "[Config] Base weight storage: " << args.base_weight_storage << std::endl;
         std::cout << "[Config] Shuffle train: " << (args.shuffle_train ? "true" : "false") << std::endl;
         std::cout << "[Config] Seed: " << args.seed << std::endl;
@@ -461,13 +507,15 @@ int main(int argc, char** argv) {
                 (args.loss_impl == "auto" && use_jsonl);
             if (use_streaming_lm_loss) {
                 auto hidden = model.forward_hidden(batch.input_ids, batch.attention_mask);
-                loss = streaming_lm_cross_entropy(
-                    hidden, model.embedding_weight(), batch.labels, -100, "mean");
+                loss = streaming_lm_cross_entropy(hidden, model.output_weight(), batch.labels, -100,
+                                                  "mean");
             } else {
                 auto logits = model.forward(batch.input_ids, batch.attention_mask);
                 loss = lm_cross_entropy(logits, batch.labels, -100, "mean");
             }
-            
+
+            if (args.stability_checks && !std::isfinite(loss->data<float>()[0]))
+                throw std::runtime_error("Non-finite training loss");
             // accumulate loss
             accum_loss += loss->data<float>()[0];
             
@@ -475,14 +523,16 @@ int main(int argc, char** argv) {
             loss->backward();
 
             accum_counter++;
-            
-            // Update parameters once accumulation target is met
-            if (accum_counter >= args.grad_accum_steps) {
+
+            auto next_batch = ds.next_batch(args.batch_size, false);
+            const bool last_micro_batch = !next_batch.input_ids;
+            // Flush a short final accumulation group using its actual size.
+            if (accum_counter >= args.grad_accum_steps || last_micro_batch) {
                 std::vector<TensorPtr> grads;
                 grads.reserve(lora_params.size());
 
-                if (args.grad_accum_steps > 1) {
-                    float scale = 1.0f / static_cast<float>(args.grad_accum_steps);
+                if (accum_counter > 1) {
+                    float scale = 1.0f / static_cast<float>(accum_counter);
                     for (auto& p : lora_params) {
                         auto g = p->grad();
                         if (g) {
@@ -493,9 +543,16 @@ int main(int argc, char** argv) {
                     }
                 }
 
+                for (auto& p : lora_params)
+                    grads.push_back(p->grad());
+                StabilityStats before_clip;
+                if (args.stability_checks)
+                    before_clip = measure_finite(grads, "LoRA gradient");
                 if (args.max_grad_norm > 0.0f) {
                     opt.clip_grad_norm(lora_params, args.max_grad_norm);
                 }
+                // clip_grad_norm updates the existing gradient tensors in place.
+                grads.clear();
                 for (auto& p : lora_params) grads.push_back(p->grad());
 
                 // Print gradient L2 on first step for observation
@@ -512,6 +569,15 @@ int main(int argc, char** argv) {
                 }
 
                 opt.step(lora_params, grads);
+                if (args.stability_checks) {
+                    const auto gradient = measure_finite(grads, "clipped LoRA gradient");
+                    const auto parameter = measure_finite(lora_params, "LoRA parameter");
+                    stability_metrics << (step + 1) << ',' << std::setprecision(12)
+                                      << before_clip.l2 << ',' << gradient.l2 << ','
+                                      << gradient.max_abs << ',' << parameter.l2 << ','
+                                      << parameter.max_abs << ',' << parameter.elements << '\n';
+                    stability_metrics.flush();
+                }
                 for (auto& p : lora_params) p->zero_grad();
 
                 if (!args.pm_schedule.empty()) {
@@ -521,7 +587,7 @@ int main(int argc, char** argv) {
                 auto step_end = std::chrono::steady_clock::now();
                 double step_time_s = std::chrono::duration<double>(step_end - step_start).count();
                 double elapsed_s = std::chrono::duration<double>(step_end - train_start).count();
-                float avg_loss = accum_loss / args.grad_accum_steps;
+                float avg_loss = accum_loss / accum_counter;
 
                 metrics << (step + 1) << ","
                         << std::fixed << std::setprecision(6) << avg_loss << ","
@@ -542,16 +608,21 @@ int main(int argc, char** argv) {
                 accum_loss = 0.0f;
                 accum_counter = 0;
                 step++;
-                
-                if (args.align_mode) break; 
+                if (args.save_every > 0 && step % args.save_every == 0) {
+                    const auto checkpoint = args.output_dir + "/checkpoint-" + std::to_string(step);
+                    model.save_lora_adapter(checkpoint);
+                    std::cout << "[Checkpoint] Adapter saved: " << checkpoint << std::endl;
+                }
+                if (args.align_mode) break;
             } else {
                 MemoryManager::instance().force_cleanup();
             }
-            
+
             // Next batch
-            batch = ds.next_batch(args.batch_size, false);
+            batch = std::move(next_batch);
         }
         save_lora_weights_bin(args.output_dir, lora_params);
+        model.save_lora_adapter(args.output_dir);
         std::cout << "[Metrics] Step metrics written to "
                   << args.output_dir + "/step_metrics.csv" << std::endl;
         std::cout << "✅ Finetune finished." << std::endl;

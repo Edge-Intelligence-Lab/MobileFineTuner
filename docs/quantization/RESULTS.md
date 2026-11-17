@@ -4,6 +4,22 @@ All numbers below were measured on this machine (AMD Ryzen 9 8945HX, x86-64,
 single-threaded build) with **GPT-2 small (124M)**, LoRA `r=4`, `alpha=8`,
 WikiText-2, `seq_len=128`, `batch=1`, `seed=1234`.
 
+These are the original author's historical measurements, not a fresh benchmark
+of every current CLI. See [Mac regression notes](../validation/MACOS_20261114.md)
+for the current checkout. In particular, the standalone `eval_ppl` currently
+rejects Q8 flags; its historical quantized inference protocol below cannot be
+reproduced with that executable as shipped.
+
+The current Mac regression also fixes a disconnected GPT-2 QKV gradient path.
+The end-to-end training measurements in this historical report have not been
+rerun with that correction and should not be presented as validation of the
+corrected training behavior.
+
+The 2026-11-15 regression additionally corrects FP16 subnormal scale decoding,
+which is shared by Q8_0 blocks. The original tables have not been regenerated
+with that correction; current bounded checks are recorded in
+[the Qwen/core validation record](../validation/QWEN_20261115.md).
+
 Two axes are compared throughout:
 
 | | baseline | quantized |
@@ -173,9 +189,12 @@ file or from a `.q8` checkpoint.
 ./train ... --quantize q8_0 --save_quantized model.q8
 ./train ... --load_quantized model.q8
 
-# inference PPL of the base model
-./eval_ppl --pretrained_dir $MODEL --data_dir $DATA --seq_len 512 \
-           --max_tokens 16384 --quantize q8_0
+# Quantized validation through the training CLI (bounded validation batches).
+# This is not the historical base-model inference protocol from section 1.
+./train --pretrained_dir "$MODEL" --data_dir "$DATA" --steps 1 --seq_len 32 \
+        --batch_size 1 --rank 4 --alpha 8 --lr 2e-4 --seed 1234 \
+        --quantize q8_0 --eval_interval 1 --eval_batches 2 --eval_batch_size 1 \
+        --lora_out q8-validation-adapter.safetensors
 ```
 
 ---

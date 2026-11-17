@@ -8,11 +8,15 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace {
+
+// Autograd and memory management are process-wide. Serialize JNI sessions.
+std::mutex native_runtime_mutex;
 
 struct NativeSession {
     std::unique_ptr<ops::AutoModelForCausalLM> model;
@@ -79,6 +83,7 @@ NativeSession* require_session(JNIEnv* env, jlong handle) {
 template <typename Body, typename Result>
 Result guarded(JNIEnv* env, Body&& body, Result fallback) {
     try {
+        std::lock_guard<std::mutex> lock(native_runtime_mutex);
         return body();
     } catch (const std::invalid_argument& e) {
         throw_illegal_argument(env, e.what());
@@ -93,6 +98,7 @@ Result guarded(JNIEnv* env, Body&& body, Result fallback) {
 template <typename Body>
 void guarded_void(JNIEnv* env, Body&& body) {
     try {
+        std::lock_guard<std::mutex> lock(native_runtime_mutex);
         body();
     } catch (const std::invalid_argument& e) {
         throw_illegal_argument(env, e.what());

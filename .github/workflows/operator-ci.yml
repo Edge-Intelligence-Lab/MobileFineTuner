@@ -7,6 +7,11 @@ on:
       - "operator/**"
       - "examples/**"
       - "scripts/run_training_smoke.sh"
+      - "scripts/generate_qwen_hf_fixtures.py"
+      - "scripts/requirements-qwen*-validation.txt"
+      - "scripts/test_qwen_training_cli.py"
+      - "scripts/run_qwen_mac_stability.py"
+      - "scripts/test_qwen_mac_stability.py"
       - "scripts/test_energy_scheduler.py"
       - "scripts/check_release_tree.sh"
       - "scripts/check_local_assets.sh"
@@ -22,6 +27,11 @@ on:
       - "operator/**"
       - "examples/**"
       - "scripts/run_training_smoke.sh"
+      - "scripts/generate_qwen_hf_fixtures.py"
+      - "scripts/requirements-qwen*-validation.txt"
+      - "scripts/test_qwen_training_cli.py"
+      - "scripts/run_qwen_mac_stability.py"
+      - "scripts/test_qwen_mac_stability.py"
       - "scripts/test_energy_scheduler.py"
       - "scripts/check_release_tree.sh"
       - "scripts/check_local_assets.sh"
@@ -161,5 +171,62 @@ jobs:
       - name: Five-model smoke
         run: bash scripts/run_training_smoke.sh
 
+      - name: Qwen CLI integration
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 scripts/test_qwen_training_cli.py --binary examples/qwen_lora_finetune/build/train_wikitext --mmlu-binary examples/qwen_lora_finetune/build/train_mmlu
+
+      - name: Mac stability controller integration
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 scripts/test_qwen_mac_stability.py --binary examples/qwen_lora_finetune/build/train_wikitext
+
       - name: Energy scheduler integration
         run: python3 scripts/test_energy_scheduler.py --binary examples/qwen_lora_finetune/build/train_wikitext
+
+  qwen-reference-parity:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [dense, hybrid]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU-only reference dependencies
+        shell: bash
+        run: |
+          python -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+          if [ "${{ matrix.architecture }}" = hybrid ]; then
+            python -m pip install -r scripts/requirements-qwen35-validation.txt
+          else
+            python -m pip install -r scripts/requirements-qwen-validation.txt
+          fi
+      - name: Build native parity executable and CLI
+        run: |
+          cmake -S operator -B operator/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build operator/build -j2
+          cmake -S examples/qwen_lora_finetune -B examples/qwen_lora_finetune/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build examples/qwen_lora_finetune/build -j2
+      - name: Generate independent tiny references
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          if [ "${{ matrix.architecture }}" = hybrid ]; then
+            python scripts/generate_qwen_hf_fixtures.py --qwen35 --output runs/qwen_hf_fixtures
+          else
+            python scripts/generate_qwen_hf_fixtures.py --output runs/qwen_hf_fixtures
+          fi
+      - name: Check all logits, adapter gradients, updates and reloads
+        env:
+          MFT_QWEN_HF_FIXTURES: ${{ github.workspace }}/runs/qwen_hf_fixtures
+        run: ctest --test-dir operator/build --output-on-failure
+      - name: Load native adapters with PEFT
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python scripts/generate_qwen_hf_fixtures.py --output runs/qwen_hf_fixtures --verify-native
+      - name: Exercise CLI accumulation tail and diagnostic exports
+        run: python scripts/test_qwen_training_cli.py --binary examples/qwen_lora_finetune/build/train_wikitext --mmlu-binary examples/qwen_lora_finetune/build/train_mmlu

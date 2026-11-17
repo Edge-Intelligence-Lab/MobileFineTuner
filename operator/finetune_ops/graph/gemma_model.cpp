@@ -909,6 +909,14 @@ void GemmaModel::set_activation_checkpointing(bool enabled) {
 #endif
     if(enabled && config_.attention_dropout != 0)
         throw std::invalid_argument("checkpointing requires deterministic regions (dropout=0)");
+    if (enabled)
+        for (const auto& block : blocks_)
+            for (auto* layer :
+                 {block.q_proj_lora.get(), block.k_proj_lora.get(), block.v_proj_lora.get(),
+                  block.o_proj_lora.get(), block.gate_proj_lora.get(), block.up_proj_lora.get(),
+                  block.down_proj_lora.get()})
+                if (layer && layer->dropout() > 0)
+                    throw std::invalid_argument("Gemma checkpointing requires zero LoRA dropout");
     activation_checkpointing_ = enabled;
 }
 

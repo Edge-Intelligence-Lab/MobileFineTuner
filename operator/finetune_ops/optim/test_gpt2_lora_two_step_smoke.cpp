@@ -1,3 +1,4 @@
+#include "../core/autograd_engine.h"
 #include "../core/lm_loss.h"
 #include "../core/memory_manager.h"
 #include "../graph/gpt2_model.h"
@@ -106,14 +107,15 @@ bool is_finite_scalar(const TensorPtr& tensor) {
 
 }  // namespace
 
-int main() {
+int run_case(bool quantized, bool streaming, bool split) {
+    autograd::Engine::instance().clear_graph();
     GPT2Config cfg;
     cfg.vocab_size = 64;
     cfg.n_positions = 16;
-    cfg.n_embd = 16;
+    cfg.n_embd = 32;
     cfg.n_layer = 1;
     cfg.n_head = 4;
-    cfg.use_memory_efficient_attention = true;
+    cfg.use_memory_efficient_attention = streaming;
 
     GPT2Model model(cfg);
     initialize_tiny_gpt2(model);
@@ -123,11 +125,18 @@ int main() {
     spec.rank = 2;
     spec.alpha = 8.0f;
     spec.dropout = 0.0f;
-    spec.split_qkv = false;
+    spec.split_qkv = split;
     spec.targets = {LoraTarget::AttnQKV, LoraTarget::AttnProj};
 
     LoraInjector injector;
     injector.inject(model, spec);
+    if (quantized) {
+        auto& block = model.get_block(0);
+        for (auto* layer : {block.qkv_lin.get(), block.proj_lin.get(), block.fc_in_lin.get(),
+                            block.fc_out_lin.get()}) {
+            layer->quantize_base_weight_q8_0();
+        }
+    }
     auto lora_params = injector.get_trainable_params();
     if (lora_params.empty()) {
         std::cerr << "LoRA parameter list is empty" << std::endl;
@@ -159,6 +168,30 @@ int main() {
 
         loss->backward();
 
+        // An aggregate gradient/update check can pass while the entire QKV
+        // branch is disconnected. Each Q/K/V part of the fused B adapter must
+        // receive a nonzero gradient, including on the first (zero-B) step.
+        const auto& slices = model.get_block(0).qkv_lin->slices();
+        for (int part = 0; part < 3; ++part) {
+            const auto gradient = slices[split ? part : 0].B->grad();
+            if (!gradient) {
+                std::cerr << "Missing Q/K/V gradient" << std::endl;
+                return 1;
+            }
+            double norm_sq = 0;
+            const int width = split ? cfg.n_embd : 3 * cfg.n_embd;
+            for (int r = 0; r < spec.rank; ++r)
+                for (int c = 0; c < cfg.n_embd; ++c) {
+                    const double g =
+                        gradient->data<float>()[r * width + (split ? 0 : part * cfg.n_embd) + c];
+                    norm_sq += g * g;
+                }
+            if (!(norm_sq > 0) || !std::isfinite(norm_sq)) {
+                std::cerr << "Invalid Q/K/V gradient" << std::endl;
+                return 1;
+            }
+        }
+
         std::vector<TensorPtr> grads;
         grads.reserve(lora_params.size());
         for (const auto& param : lora_params) {
@@ -182,9 +215,9 @@ int main() {
     for (size_t i = 0; i < lora_params.size(); ++i) {
         param_delta = std::max(param_delta, max_abs_diff(before[i], lora_params[i]));
     }
-    std::cout << "[GPT2LoRATwoStepSmoke] loss0=" << losses[0]
-              << " loss1=" << losses[1]
-              << " param_delta=" << param_delta << std::endl;
+    std::cout << "[GPT2LoRATwoStepSmoke] loss0=" << losses[0] << " loss1=" << losses[1]
+              << " param_delta=" << param_delta << " quantized=" << quantized
+              << " streaming=" << streaming << " split=" << split << std::endl;
 
     bool ok =
         std::isfinite(static_cast<double>(losses[0])) &&
@@ -192,4 +225,15 @@ int main() {
         param_delta > 0.0;
     std::cout << (ok ? "[PASS]" : "[FAIL]") << std::endl;
     return ok ? 0 : 1;
+}
+
+int main() {
+    for (bool quantized : {false, true}) {
+        for (bool streaming : {false, true}) {
+            for (bool split : {false, true})
+                if (run_case(quantized, streaming, split) != 0)
+                    return 1;
+        }
+    }
+    return 0;
 }

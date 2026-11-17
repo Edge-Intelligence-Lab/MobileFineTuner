@@ -49,6 +49,56 @@ void write_tensor_float(const TensorPtr& t, int64_t idx, float value) {
     }
 }
 
+// Functional column addition keeps split Q/K/V adapters connected to autograd.
+struct AddColumnsBackward : BackwardFunction {
+    int64_t offset, width;
+    AddColumnsBackward(int64_t o, int64_t w) : offset(o), width(w) {}
+    std::vector<TensorPtr> apply(const TensorPtr& gradient) override {
+        auto shape = gradient->shape();
+        const int64_t columns = shape.back(), rows = gradient->numel() / columns;
+        shape.back() = width;
+        auto delta_gradient = zeros(shape, kFloat32, gradient->device());
+        for (int64_t row = 0; row < rows; ++row)
+            std::memcpy(delta_gradient->data<float>() + row * width,
+                        gradient->data<float>() + row * columns + offset, width * sizeof(float));
+        return {gradient, delta_gradient};
+    }
+};
+
+TensorPtr add_lora_columns(const TensorPtr& base, const TensorPtr& delta, int64_t offset) {
+    if (base->ndim() != 3 || delta->ndim() != 3 || base->dtype() != kFloat32 ||
+        delta->dtype() != kFloat32 || base->shape()[0] != delta->shape()[0] ||
+        base->shape()[1] != delta->shape()[1] || offset < 0 ||
+        offset + delta->shape()[2] > base->shape()[2])
+        throw std::invalid_argument("Invalid LoRA subcolumn update");
+    auto output = zeros(base->shape(), kFloat32, base->device());
+    std::memcpy(output->data<float>(), base->data<float>(), base->numel() * sizeof(float));
+    const int64_t columns = base->shape()[2], width = delta->shape()[2],
+                  rows = base->shape()[0] * base->shape()[1];
+    for (int64_t row = 0; row < rows; ++row)
+        for (int64_t col = 0; col < width; ++col)
+            output->data<float>()[row * columns + offset + col] +=
+                delta->data<float>()[row * width + col];
+    if (autograd::Engine::instance().is_enabled() &&
+        (base->requires_grad() || delta->requires_grad())) {
+        output->set_requires_grad(true);
+        auto backward = std::make_shared<AddColumnsBackward>(offset, width);
+#ifdef USE_NEW_AUTOGRAD_ENGINE
+        autograd::Engine::instance().register_node(output, {base, delta}, backward);
+#else
+        output->set_grad_fn([base, delta, backward](const TensorPtr& go) {
+            auto gradients = backward->apply(go);
+            if (base->requires_grad())
+                accumulate_gradient(base, gradients[0]);
+            if (delta->requires_grad())
+                accumulate_gradient(delta, gradients[1]);
+            return gradients;
+        });
+#endif
+    }
+    return output;
+}
+
 struct EffectiveLoraShape {
     int64_t in_dim = 0;
     int64_t rank = 0;
@@ -430,6 +480,13 @@ void LoRALinear::attach_lora(const TensorPtr& A, const TensorPtr& B,
     slices_.emplace_back(A, B, scale, col0, out_cols);
 }
 
+void LoRALinear::set_dropout(float probability, uint64_t seed) {
+    if (!std::isfinite(probability) || probability < 0 || probability >= 1)
+        throw std::invalid_argument("LoRA dropout must be finite and in [0,1)");
+    dropout_ = probability;
+    dropout_rng_.seed(static_cast<uint32_t>(seed));
+}
+
 void LoRALinear::clear_lora() {
     if (merged_) {
         unmerge_from_base();
@@ -566,19 +623,19 @@ TensorPtr LoRALinear::forward(const TensorPtr& x) const {
             auto w_eff = std::make_shared<Tensor>(
                 std::vector<int64_t>{m, k}, w_deq.data(), kFloat32, kCPU, true);
             const double ta1 = pg_now();
-            auto y_ref = matmul(x, w_eff);
+            auto y_ref = matmul_rhs_T(x, w_eff);
             const double ta2 = pg_now();
             p_deq_ms += (ta1 - ta0);
             p_fp32mm_ms += (ta2 - ta1);
 
             if (p_calls <= 3 || (p_calls % 500) == 0) {
                 std::fprintf(stderr,
-                    "[QLoRA-profile] call=%lld n=%lld k=%lld m=%lld | "
-                    "int8_kernel=%.2fms  dequant=%.2fms  fp32_matmul=%.2fms | "
-                    "cum kernel=%.1f quant=%.1f deq=%.1f fp32mm=%.1f ms\n",
-                    (long long)p_calls, (long long)n, (long long)k, (long long)m,
-                    pg_t4 - pg_t3, ta1 - ta0, ta2 - ta1,
-                    p_kernel_ms, p_quant_ms, p_deq_ms, p_fp32mm_ms);
+                             "[QLoRA-profile] call=%lld n=%lld k=%lld m=%lld | "
+                             "int8_kernel=%.2fms  dequant=%.2fms  fp32_matmul=%.2fms | "
+                             "cum kernel=%.1f quant=%.1f alloc=%.1f deq=%.1f fp32mm=%.1f ms\n",
+                             (long long)p_calls, (long long)n, (long long)k, (long long)m,
+                             pg_t4 - pg_t3, ta1 - ta0, ta2 - ta1, p_kernel_ms, p_quant_ms,
+                             p_alloc_ms, p_deq_ms, p_fp32mm_ms);
             }
         } else if (std::getenv("QLORA_PROFILE_FUSED") != nullptr) {
             // env var set but this static was initialised earlier without it
@@ -632,6 +689,14 @@ TensorPtr LoRALinear::forward(const TensorPtr& x) const {
     
     // LoRA delta: Σ scale * (x @ A @ B)
     if (!slices_.empty() && !merged_) {
+        auto lora_input = x;
+        if (dropout_ > 0 && training_ && autograd::Engine::instance().is_enabled()) {
+            auto mask = zeros(x->shape(), kFloat32, x->device());
+            std::bernoulli_distribution keep(1.0 - dropout_);
+            for (int64_t i = 0; i < mask->numel(); ++i)
+                mask->data<float>()[i] = keep(dropout_rng_) ? 1.0f / (1.0f - dropout_) : 0.0f;
+            lora_input = mul(x, mask);
+        }
         const int64_t w0 = is_quantized_ ? q8_k_ : W_->shape()[0];
         const int64_t w1 = is_quantized_ ? q8_m_ : W_->shape()[1];
         int64_t in_dim_x = x->shape()[2];
@@ -676,13 +741,17 @@ TensorPtr LoRALinear::forward(const TensorPtr& x) const {
                 throw std::runtime_error("LoRA B shape mismatch");
             }
 
+            if (slice.col0 < 0 || slice.cols <= 0 || int64_t(slice.col0) + slice.cols > out_dim ||
+                B_eff->shape()[1] != slice.cols)
+                throw std::invalid_argument(
+                    "LoRA slice range/width does not match the output matrix");
             auto x_shape = x->shape();
             int64_t batch = x_shape[0];
             int64_t seq = x_shape[1];
             int64_t in_dim = x_shape[2];
 
             // delta = (x @ A_eff) @ B_eff
-            auto X2d = reshape(x, {batch * seq, in_dim});        // [N, in]
+            auto X2d = reshape(lora_input, {batch * seq, in_dim}); // [N, in]
             log_shape("xA matmul", X2d, A_eff);
             auto xA2d = matmul(X2d, A_eff);                      // [N, r]
             log_shape("delta matmul", xA2d, B_eff);
@@ -693,21 +762,7 @@ TensorPtr LoRALinear::forward(const TensorPtr& x) const {
             if (slice.cols == out_dim && slice.col0 == 0) {
                 y = add(y, delta);
             } else {
-                // 部分列更新
-                float* y_data = y->data<float>();
-                const float* delta_data = delta->data<float>();
-                auto y_shape = y->shape();
-                int64_t Bn = y_shape[0];
-                int64_t S = y_shape[1];
-                for (int64_t b = 0; b < Bn; ++b) {
-                    for (int64_t s = 0; s < S; ++s) {
-                        for (int64_t c = 0; c < slice.cols; ++c) {
-                            int64_t y_idx = b * S * out_dim + s * out_dim + (slice.col0 + c);
-                            int64_t delta_idx = b * S * slice.cols + s * slice.cols + c;
-                            y_data[y_idx] += delta_data[delta_idx];
-                        }
-                    }
-                }
+                y = add_lora_columns(y, delta, slice.col0);
             }
 
             // Rely on standard autograd path: delta = ((x @ A_eff) @ B_eff) * scale

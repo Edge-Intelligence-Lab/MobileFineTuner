@@ -15,7 +15,8 @@ namespace ops {
  * @brief Cross-Entropy loss for language modeling
  * 
  * @param logits [B, S, V] float32
- * @param labels [B, S] int32, PAD positions use ignore_index
+ * @param labels [B, S] int32 aligned with input IDs; PAD uses ignore_index.
+ *               The loss compares logits[:, :-1] with labels[:, 1:].
  * @param ignore_index Label value to ignore (default -100)
  * @param reduction "mean" | "sum" | "none"
  * @return 
@@ -42,7 +43,7 @@ TensorPtr lm_cross_entropy(const TensorPtr& logits,
  * Shapes:
  * - hidden: [B, S, H]
  * - lm_head_weight: [V, H] (Qwen tied embedding weight layout)
- * - labels: [B, S], with shifted labels and ignore_index support
+ * - labels: [B, S], aligned with input IDs; the loss applies the causal shift
  *
  * This is intended for LoRA / frozen-base fine-tuning. It preserves dense-CE
  * gradients w.r.t. hidden states while avoiding allocation of [B,S,V] logits

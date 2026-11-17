@@ -16,6 +16,8 @@ struct GemmaLoraSpec {
     };
     std::vector<int> layers;  // empty = all layers
 
+    uint64_t seed = 42;
+
     static GemmaLoraSpec full_attn_mlp() {
         return GemmaLoraSpec();
     }

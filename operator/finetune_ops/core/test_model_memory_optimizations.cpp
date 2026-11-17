@@ -113,20 +113,39 @@ int main() try {
     QwenConfig q;q.vocab_size=32;q.hidden_size=8;q.intermediate_size=16;q.num_hidden_layers=2;q.num_attention_heads=2;q.num_key_value_heads=1;
     GemmaTextConfig g;g.vocab_size=32;g.hidden_size=8;g.intermediate_size=16;g.num_hidden_layers=2;g.num_attention_heads=2;g.num_key_value_heads=1;g.head_dim=4;
     g.query_pre_attn_scalar=9;g.sliding_window=2;g.layer_types={"sliding_attention","full_attention"};
-    std::vector<Observation> qref,gref;
+    QwenConfig q3 = q;
+    q3.model_type = "qwen3";
+    q3.head_dim = 6;
+    q3.attention_bias = false;
+    q3.tie_word_embeddings = false;
+    std::vector<Observation> qref, gref, q3ref;
     for(int mode=0;mode<8;++mode) {
         QwenModel qm(q);base(qm);qm.init_lora(2,4,0,false,42);
         auto qr=run(qm,mode,dir);if(!mode)qref=qr;else check(qref,qr,"Qwen trajectory mode="+std::to_string(mode),!(mode&1));
         GemmaModel gm(g);base(gm);GemmaLoraInjector injector;
         auto spec=GemmaLoraSpec::full_attn_mlp();spec.rank=2;spec.alpha=4;spec.dropout=0;injector.inject(gm,spec);
         auto gr=run(gm,mode,dir);if(!mode)gref=gr;else check(gref,gr,"Gemma trajectory mode="+std::to_string(mode),!(mode&1));
+        QwenModel q3m(q3);
+        base(q3m);
+        q3m.init_lora(2, 4, 0, std::vector<std::string>{"all-linear"}, 42);
+        auto q3r = run(q3m, mode, dir);
+        if (!mode)
+            q3ref = q3r;
+        else
+            check(q3ref, q3r, "Qwen3 trajectory mode=" + std::to_string(mode), !(mode & 1));
         if(mode&1) {
             QwenModel qa(q);base(qa);qa.init_lora(2,4,0,false,42);
             check(qref,run(qa,mode,dir,&qref),"Qwen identical-input mode="+std::to_string(mode));
             GemmaModel ga(g);base(ga);injector.inject(ga,spec);
             check(gref,run(ga,mode,dir,&gref),"Gemma identical-input mode="+std::to_string(mode));
+            QwenModel q3a(q3);
+            base(q3a);
+            q3a.init_lora(2, 4, 0, std::vector<std::string>{"all-linear"}, 42);
+            check(q3ref, run(q3a, mode, dir, &q3ref),
+                  "Qwen3 identical-input mode=" + std::to_string(mode));
         }
     }
     std::filesystem::remove_all(dir);
-    std::cout<<"PASS: Qwen/Gemma, eight combinations, three Adam updates and identical-input gradient checks\n";
+    std::cout << "PASS: Qwen2/Qwen3/Gemma, eight combinations, three Adam updates and "
+                 "identical-input gradient checks\n";
 } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

@@ -99,6 +99,7 @@ public:
     void unmerge_lora();
     void set_memory_efficient_attention(bool enabled);
     void set_activation_checkpointing(bool enabled);
+    bool activation_checkpointing_enabled() const { return activation_checkpointing_; }
     void enable_parameter_sharding(const sharding::ShardConfig& config);
     sharding::ShardStats sharding_stats() const { return offload_ ? offload_->stats() : sharding::ShardStats{}; }
 

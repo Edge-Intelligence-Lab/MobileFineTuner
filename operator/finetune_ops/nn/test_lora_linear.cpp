@@ -1,5 +1,6 @@
-#include "lora_linear.h"
+#include "../core/autograd_engine.h"
 #include "../core/ops.h"
+#include "lora_linear.h"
 
 #include <cmath>
 #include <cstdint>
@@ -124,6 +125,18 @@ void test_bf16_merge_restores_original_storage() {
     }
 }
 
+void test_q8_subnormal_scale_matches_fp32() {
+    auto weight = make_f32({64, 32}, std::vector<float>(64 * 32, 1e-4f));
+    auto input = make_f32({1, 1, 64}, std::vector<float>(64, 1.0f));
+    LoRALinear layer(weight);
+    auto expected = layer.forward(input);
+    layer.quantize_base_weight_q8_0();
+    auto quantized = layer.forward(input);
+    const float error = max_abs_diff(expected, quantized);
+    require(error < 0.02f * std::fabs(expected->data<float>()[0]),
+            "Q8 FP16 subnormal scales incorrectly halve the base output");
+}
+
 void test_clear_lora_unmerges_first() {
     auto W = make_bf16({2, 2}, {0.1f, 0.2f, 0.3f, 0.4f});
     auto A = make_f32({2, 1}, {0.5f, -0.25f});
@@ -143,12 +156,68 @@ void test_clear_lora_unmerges_first() {
     }
 }
 
+#ifdef USE_NEW_AUTOGRAD_ENGINE
+void test_subcolumn_backward_finite_difference() {
+    auto& engine = autograd::Engine::instance();
+    engine.clear_graph();
+    engine.set_enabled(true);
+    auto weight = zeros({3, 5});
+    for (int i = 0; i < 15; ++i)
+        weight->data<float>()[i] = 0.1f * std::sin(float(i + 1));
+    auto a = make_f32({3, 2}, {0.1f, -0.2f, 0.3f, 0.4f, -0.5f, 0.6f});
+    auto b = make_f32({2, 2}, {0.7f, -0.8f, 0.9f, 1.0f});
+    auto x = make_f32({1, 2, 3}, {1.0f, -2.0f, 0.5f, -1.5f, 0.25f, 2.0f});
+    x->set_requires_grad(true);
+    LoRALinear layer(weight);
+    layer.attach_lora(a, b, 0.5f, 2, 2);
+    auto seed = ones({1, 2, 5});
+    for (int i = 0; i < 10; ++i)
+        seed->data<float>()[i] = 0.1f * (i - 3);
+    auto loss = sum(mul(layer.forward(x), seed));
+    loss->backward();
+    const std::vector<TensorPtr> inputs = {x, a, b};
+    std::vector<TensorPtr> gradients;
+    for (const auto& p : inputs) {
+        require(bool(p->grad()), "Subcolumn gradient missing");
+        gradients.push_back(p->grad()->clone());
+    }
+    engine.clear_graph();
+    engine.set_enabled(false);
+    auto evaluate = [&] {
+        auto output = layer.forward(x);
+        double value = 0;
+        for (int i = 0; i < 10; ++i)
+            value += double(output->data<float>()[i]) * seed->data<float>()[i];
+        return value;
+    };
+    for (size_t p = 0; p < inputs.size(); ++p)
+        for (int64_t i = 0; i < inputs[p]->numel(); ++i) {
+            auto& value = inputs[p]->data<float>()[i];
+            const float original = value, eps = 1e-3f;
+            value = original + eps;
+            const double plus = evaluate();
+            value = original - eps;
+            const double minus = evaluate();
+            value = original;
+            const double reference = (plus - minus) / (2 * eps),
+                         actual = gradients[p]->data<float>()[i];
+            require(std::abs(reference - actual) < 5e-4 + 1e-3 * std::abs(reference),
+                    "Subcolumn derivative failed finite differences");
+        }
+    engine.set_enabled(true);
+}
+#endif
+
 }  // namespace
 
 int main() {
     test_fp32_subcolumn_merge_matches_forward();
+#ifdef USE_NEW_AUTOGRAD_ENGINE
+    test_subcolumn_backward_finite_difference();
+#endif
     test_bf16_merge_restores_original_storage();
     test_clear_lora_unmerges_first();
+    test_q8_subnormal_scale_matches_fp32();
     std::cout << "[PASS] LoRALinear merge/unmerge tests" << std::endl;
     return 0;
 }

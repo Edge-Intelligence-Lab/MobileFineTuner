@@ -47,6 +47,9 @@ void LoraState::init(int64_t in_features, int64_t out_features,
 // ============================================================================
 
 void LoraInjector::inject(GPT2Model& model, const LoraSpec& spec) {
+    if (spec.rank <= 0 || !std::isfinite(spec.alpha) || spec.alpha <= 0 ||
+        !std::isfinite(spec.dropout) || spec.dropout < 0 || spec.dropout >= 1)
+        throw std::invalid_argument("Invalid GPT-2 LoRA rank, alpha or dropout");
     model_ = &model;
     spec_ = spec;
     num_layers_ = model.config().n_layer;
@@ -74,7 +77,7 @@ void LoraInjector::inject(GPT2Model& model, const LoraSpec& spec) {
         auto A = zeros({in_dim, rank}, kFloat32, kCPU);
         float* A_data = A->data<float>();
         float bound = std::sqrt(6.0f / (in_dim + rank));
-        std::mt19937 gen(42 + in_dim + out_dim);  // simple seed
+        std::mt19937 gen(static_cast<uint32_t>(spec.seed) + in_dim + out_dim); // simple seed
         std::uniform_real_distribution<float> dist(-bound, bound);
         for (int64_t i = 0; i < A->numel(); ++i) {
             A_data[i] = dist(gen);
@@ -130,7 +133,15 @@ void LoraInjector::inject(GPT2Model& model, const LoraSpec& spec) {
             }
         }
     }
-    
+
+    for (int i : target_layers) {
+        auto& block = model.get_block(i);
+        uint64_t seed = spec.seed + uint64_t(i) * 4;
+        for (auto* layer : {block.qkv_lin.get(), block.proj_lin.get(), block.fc_in_lin.get(),
+                            block.fc_out_lin.get()})
+            layer->set_dropout(spec.dropout, seed++);
+    }
+
     std::cout << "[LoraInjector] Injected " << lora_count << " LoRA modules to " 
               << target_layers.size() << " layers" << std::endl;
     
@@ -429,6 +440,8 @@ void LoraInjector::load_lora_safetensors(const std::string& path) {
     }
     model_->init_lora_modules();
     auto state = LoraSaver::load_safetensors(path);
+    if (!std::isfinite(state.dropout) || state.dropout < 0 || state.dropout >= 1)
+        throw std::invalid_argument("Invalid saved GPT-2 LoRA dropout");
     spec_.rank = state.rank;
     spec_.alpha = state.alpha;
     spec_.dropout = state.dropout;
@@ -438,6 +451,14 @@ void LoraInjector::load_lora_safetensors(const std::string& path) {
     }
     LoraSaver::attach_from_state(*model_, state);
     merged_ = false;
+    for (int i = 0; i < model_->config().n_layer; ++i) {
+        auto& block = model_->get_block(i);
+        uint64_t seed = spec_.seed + uint64_t(i) * 4;
+        for (auto* layer : {block.qkv_lin.get(), block.proj_lin.get(), block.fc_in_lin.get(),
+                            block.fc_out_lin.get()})
+            if (layer)
+                layer->set_dropout(spec_.dropout, seed++);
+    }
 }
 
 void LoraInjector::merge_all(GPT2Model& model) {
