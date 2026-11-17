@@ -174,7 +174,9 @@ jobs:
       - name: Qwen CLI integration
         env:
           PYTHONDONTWRITEBYTECODE: '1'
-        run: python3 scripts/test_qwen_training_cli.py --binary examples/qwen_lora_finetune/build/train_wikitext --mmlu-binary examples/qwen_lora_finetune/build/train_mmlu
+        run: |
+          cmake --build examples/qwen_lora_finetune/build --target train_mmlu -j2
+          python3 scripts/test_qwen_training_cli.py --binary examples/qwen_lora_finetune/build/train_wikitext --mmlu-binary examples/qwen_lora_finetune/build/train_mmlu
 
       - name: Mac stability controller integration
         env:
