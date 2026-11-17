@@ -89,6 +89,58 @@ def main():
             assert (output / "REPORT.md").is_file()
         finally:
             (output / "control.json").write_text('{"stop_requested":true}')
+        combined = root / "combined"
+        subprocess.run(
+            common
+            + [
+                "--output",
+                str(combined),
+                "--execution-profile",
+                "combined",
+                "--offload-resident-mib",
+                "8",
+            ],
+            check=True,
+            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+            timeout=15,
+        )
+        try:
+            state = wait_status(
+                combined, lambda s: s["state"] in ("complete", "stopped_or_failed")
+            )
+            assert state["state"] == "complete", state
+            plan = json.loads((combined / "plan.json").read_text())
+            assert (
+                plan["execution_profile"] == "combined"
+                and plan["base_weight_storage"] == "fp32"
+            )
+            assert [j["summary"]["steps"] for j in state["jobs"]] == [3, 4, 2, 1]
+            for job in state["jobs"]:
+                assert "--activation_checkpointing" in job["command"]
+                assert "--memory_efficient_attention" in job["command"]
+                io = job["summary"]["offload"]
+                assert io["loads"] > io["entries"] > 0 and io["bytes_read"] > 0
+                assert job["offload_cleanup"] == "removed_after_validation"
+                assert not (combined / job["name"] / "offload").exists()
+        finally:
+            (combined / "control.json").write_text('{"stop_requested":true}')
+        invalid = root / "invalid"
+        result = subprocess.run(
+            common
+            + [
+                "--output",
+                str(invalid),
+                "--execution-profile",
+                "combined",
+                "--dropout",
+                "0.05",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        assert result.returncode != 0 and "requires --dropout 0" in result.stderr
+        assert not invalid.exists(), "Invalid profile created run artifacts"
         # A queued run must stop on request without starting a training process.
         previous = root / "previous.json"
         previous.write_text('{"state":"running"}')
@@ -106,7 +158,7 @@ def main():
         )
         assert state["error"] == "user_stop_requested" and not state["jobs"]
     print(
-        "PASS: detached queue, pinned binary, native training/resume, reports and queued stop"
+        "PASS: detached baseline/combined queues, actual offload I/O, shard cleanup, invalid-profile rejection, pinned binary, native training/resume, reports and queued stop"
     )
 
 

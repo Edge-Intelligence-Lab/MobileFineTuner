@@ -38,6 +38,13 @@ def parse_args():
     parser.add_argument("--dropout", type=float, default=0.05)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument(
+        "--execution-profile",
+        choices=["baseline", "combined"],
+        default="baseline",
+        help="combined enables streamed attention, checkpointing and FP32 frozen-weight offload",
+    )
+    parser.add_argument("--offload-resident-mib", type=int, default=1536)
     parser.add_argument("--rss-limit-mib", type=float, default=8192)
     parser.add_argument("--swap-growth-limit-mib", type=float, default=3072)
     parser.add_argument(
@@ -76,6 +83,12 @@ def parse_args():
         or min(args.rss_limit_mib, args.swap_growth_limit_mib) <= 0
     ):
         parser.error("Invalid numeric training/resource settings")
+    if args.offload_resident_mib <= 0:
+        parser.error("--offload-resident-mib must be positive")
+    if args.execution_profile == "combined" and args.dropout != 0:
+        parser.error(
+            "combined profile requires --dropout 0 for deterministic checkpointing"
+        )
     return args
 
 
@@ -156,6 +169,7 @@ def write_report():
         f"State: **{STATUS['state']}**",
         "",
         "This is a native CPU stability check. Pending jobs are not counted as passes.",
+        f"Execution profile: **{ARGS.execution_profile}**.",
         "Adapter resume uses a fresh optimizer; optimizer/RNG state is not restored.",
         "",
         "| Job | Model | State | Completed/planned | Last loss | Sampled RSS MiB |",
@@ -373,6 +387,30 @@ def inspect_completed(job):
                 ),
                 "Stability validation failed",
             )
+    if ARGS.execution_profile == "combined":
+        log = (directory / "train.log").read_text()
+        match = re.search(
+            r"\[Offload\] entries=(\d+) loads=(\d+) evictions=(\d+) bytes_read=(\d+) bytes_written=(\d+) writes=(\d+)",
+            log,
+        )
+        require(bool(match), "Missing offload payload statistics")
+        entries, loads, evictions, read, written, writes = map(int, match.groups())
+        require(
+            loads > entries > 0
+            and evictions > 0
+            and read > 0
+            and written > 0
+            and writes == entries,
+            "Combined profile did not perform actual offload I/O",
+        )
+        result["offload"] = dict(
+            entries=entries,
+            loads=loads,
+            evictions=evictions,
+            bytes_read=read,
+            bytes_written=written,
+            writes=writes,
+        )
     atomic(directory / "summary.json", result)
     return result
 
@@ -384,6 +422,11 @@ def run_job(name, model, steps, expected, *, seq=None, calibration=False, resume
         seq = ARGS.seq_len
     if stop_requested():
         raise RuntimeError("user_stop_requested")
+    if (
+        ARGS.execution_profile == "combined"
+        and shutil.disk_usage(OUT).free < 8 * 1024**3
+    ):
+        raise RuntimeError("resource_guard_less_than_8GiB_free_disk")
     cmd = [
         str(BIN),
         "--model_dir",
@@ -409,13 +452,22 @@ def run_job(name, model, steps, expected, *, seq=None, calibration=False, resume
         "--max_grad_norm",
         "1",
         "--base_weight_storage",
-        "auto",
+        "fp32" if ARGS.execution_profile == "combined" else "auto",
         "--stability_checks",
         "--save_every",
         "2" if calibration else "100",
         "--output_dir",
         str(directory),
     ]
+    if ARGS.execution_profile == "combined":
+        cmd += [
+            "--activation_checkpointing",
+            "--memory_efficient_attention",
+            "--offload_dir",
+            str(directory / "offload"),
+            "--offload_resident_mb",
+            str(ARGS.offload_resident_mib),
+        ]
     if resume:
         cmd += ["--resume_from", str(OUT / resume), "--seed", "43"]
     job = {
@@ -556,6 +608,17 @@ def run_job(name, model, steps, expected, *, seq=None, calibration=False, resume
         record()
         raise
     job["state"] = "passed"
+    # A successful exited process no longer needs its temporary frozen shards.
+    # Preserve logs, I/O counters and adapters; retain shards on failed jobs.
+    if ARGS.execution_profile == "combined":
+        shards = directory / "offload"
+        require(
+            not shards.is_symlink() and shards.parent == directory,
+            "Refusing offload cleanup outside this job",
+        )
+        if shards.exists():
+            shutil.rmtree(shards)
+        job["offload_cleanup"] = "removed_after_validation"
     record()
     print(name, "passed", job["elapsed_s"], flush=True)
 
@@ -601,6 +664,14 @@ if __name__ == "__main__":
         "alpha": ARGS.alpha,
         "dropout": ARGS.dropout,
         "threads_cap": ARGS.threads,
+        "execution_profile": ARGS.execution_profile,
+        "base_weight_storage": "fp32"
+        if ARGS.execution_profile == "combined"
+        else "auto",
+        "offload_resident_mib": ARGS.offload_resident_mib,
+        "activation_checkpointing": ARGS.execution_profile == "combined",
+        "memory_efficient_attention": ARGS.execution_profile == "combined",
+        "controller_sha256": sha256_file(Path(__file__).resolve()),
         "dataset": str(DATA),
         "calibration_dataset": str(EXCERPT),
         "binary_sha256": sha256_file(BIN),

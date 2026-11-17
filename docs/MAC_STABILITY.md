@@ -28,6 +28,23 @@ requests to the numerical runtime, not CPU affinity guarantees. Optional
 main dataset. `--after-status runs/previous/status.json` waits for a prior queue
 to finish successfully before starting, so queues need not train concurrently.
 
+For the combined optimization path, use a separate output directory and add:
+
+```text
+--execution-profile combined --dropout 0 --offload-resident-mib 1536
+```
+
+This profile enables streamed attention, deterministic block checkpointing and
+FP32 frozen-weight disk offload together in calibration, long, adapter-resume
+and stress jobs. It checks real payload I/O in addition to training metrics.
+The plan records the profile, controller hash and storage/budget settings.
+A job needs at least 8 GiB free disk before starting. After a successful child
+exit and validation, only that job's temporary `offload/` directory is removed;
+logs, I/O counters, summaries and adapters remain. Failed jobs retain their
+shards for inspection. The baseline profile and its defaults remain available.
+This profile tests the three features together, not every individual switch
+combination for hundreds of steps.
+
 Inspect `status.json`, `REPORT.md`, `plan.json` and per-job logs/CSV files. The
 controller checks exact step counts, finite loss/gradients/parameters, nonzero B
 matrices, adapter tensor counts, resumed tensor changes, clipping bounds and
