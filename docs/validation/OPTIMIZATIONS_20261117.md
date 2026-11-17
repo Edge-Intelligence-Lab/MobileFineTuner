@@ -66,37 +66,92 @@ nor evidence of a universal memory saving or speedup.
 - A legacy-engine library build succeeds. The capability registry keeps its
   unsupported new-engine paths disabled.
 
-## Real checkpoints and outstanding qualification
+## Completed real-checkpoint and stability checks — 2026-11-18
 
-The current official Qwen3.5-0.8B reference check passed native base storage with
-ordinary/streamed attention, each with checkpointing off/on: four profiles.
-Maximum observed logit error is `6.31809e-5`, adapter-gradient absolute error
+These follow-up checks use binaries pinned from the `d9ad0a5` code snapshot
+(the subsequent `216b29c` commit changes documentation only). The default long
+run uses an earlier pinned binary; its scope is separated below. On the tested
+code revision, hosted Mac build/test and Linux dense/hybrid reference CI all
+completed successfully. Later documentation-only commits may trigger new CI.
+
+### Official Qwen3.5 full-weight optimization matrix
+
+All eight combinations of ordinary/streamed attention, checkpointing off/on and
+frozen-weight offload off/on pass independent HF logits, every adapter gradient,
+one SGD update and post-update output checks. Non-offloaded profiles use native
+base storage; offload profiles promote the same checkpoint values to FP32.
+Maximum observed logit error is `6.38962e-5`, adapter-gradient absolute error
 `4.84467e-4`, and one-SGD-update error `4.84288e-7`. The full-model gradient check
 also enforces per-tensor relative-L2 and scale-relative maximum bounds; absolute
-maxima alone are not its acceptance rule. This is not full-size Adam trajectory
-parity.
+maxima alone are not its acceptance rule. Full-size Adam trajectory parity is
+not claimed.
 
-The attempted eight-profile real-weight matrix stopped on configured global
-swap-growth protection while moving to FP32 offload. No numerical pass is
-assigned to the uncompleted profiles. Three attempts preserve their logs;
-constructor allocation and transpose copies were reduced between attempts.
-The final attempt stopped after 130.31 s, with sampled RSS peak 2894.33 MiB;
-global swap reached 11132.12 MiB against a 10789.81 MiB stop threshold. The guard
-was retained and no user applications or OS swap settings were changed.
+Each offload profile registers all 320 frozen tensors, writes 3,009,572,096
+payload bytes and reloads them during execution. Successful read payload is
+12,080,072,448 bytes without checkpointing and 14,072,521,728 with checkpointing.
+These count tensor payload operations, not physical uncached disk traffic.
+The serialized eight-profile job completes in 131.30 seconds with sampled
+peak RSS 3867.47 MiB. This is a short numerical check, not an optimized long run.
 
-Real-model offload profiles, the new-default versus pinned-long-run adapter
-comparison, and updated Gemma 270M/1B ordinary/combined-mode three-step checks are
-queued serially after the current long-run queue. They are **pending**, not
-passed. Prior real Gemma regression results refer to the code revision named in
-[that record](GEMMA_20261117.md); the new trainer changes do not inherit full-size
-qualification merely from those older runs.
+Earlier concurrent attempts stopped on global swap-growth protection while
+moving to FP32 offload. Their logs and guard failures remain preserved; no pass
+was assigned to those interrupted attempts. Deferred allocation and direct
+transpose reduced extra loading allocations. After the long queue released its
+resources, the serialized run completed with the same guard policy. No user
+applications or OS swap settings were changed to force completion.
 
-The active long queue uses a pinned pre-refactor executable. Earlier preliminary
-Qwen runs completed 300 + 30 adapter-resume steps per model; their sequence-128
-stress run stopped on its resource guard. The active final-candidate run and the
-new optimized paths do not inherit a completed long-run result from those runs.
-Check the controller status/report rather than assuming elapsed time implies
-completion.
+### Latest Gemma trainer with real weights
+
+Gemma 3 270M and 1B-PT each pass three optimizer updates in ordinary mode and
+combined checkpointing + streamed attention + FP32 offload mode. Sequence length
+is 16, batch/accumulation 1, rank 2, alpha 4, dropout 0, LR 2e-4, no warmup.
+
+| Model/path | Logged losses | Adapter tensors finite and changed from step 1 to 3 | Sampled peak RSS MiB |
+| --- | --- | ---: | ---: |
+| 270M ordinary | 6.75599, 9.061, 5.603 | 252/252 | 3235.16 |
+| 270M combined | 6.75599, 9.061, 5.603 | 252/252 | 3269.00 |
+| 1B-PT ordinary | 6.27291, 7.817, 5.218 | 364/364 | 4412.69 |
+| 1B-PT combined | 6.27292, 7.817, 5.218 | 364/364 | 4531.27 |
+
+Every B matrix is nonzero and every final export equals its step-3 snapshot.
+Combined runs report positive payload reads/writes and loads/evictions: 270M
+reads 6,434,348,544 and writes 1,743,481,344 bytes; 1B reads 23,997,249,024 and
+writes 5,207,503,360 bytes. Logged losses use limited display precision; adapter
+values and I/O checks provide additional acceptance evidence. Varying minibatches
+mean these three losses are not a convergence benchmark. These results validate
+the new trainer on full checkpoints, without claiming Gemma long-run stability.
+
+### Default-path Qwen stability queue
+
+The queue completed at **2026-11-18 01:06:29 CST**. All three models pass 300
+sequence-32 optimizer updates and 30 adapter-resume updates with a fresh
+optimizer. All losses, gradient metrics and adapter tensors are finite; all
+adapter tensors change on resume. The runner flags neither sustained RSS growth
+nor significant slowdown on the covered long runs.
+
+| Model | Long + adapter-resume steps | Sampled long-run peak RSS MiB | Late-minus-early median RSS MiB | Late/early median step time |
+| --- | ---: | ---: | ---: | ---: |
+| Qwen3.5-0.8B | 300 + 30 | 2934.30 | -1.55 | 0.996 |
+| Qwen3-0.6B | 300 + 30 | 2042.14 | +0.42 | 0.998 |
+| Qwen2.5-0.5B | 300 + 30 | 1634.11 | -4.39 | 1.014 |
+
+Qwen3.5 additionally passes five sequence-128 stress updates from the resumed
+adapter, with sampled peak RSS 6862.11 MiB. This short stress result does not
+qualify arbitrary longer sequences or every device memory limit.
+
+The long queue pins pre-refactor executable SHA-256
+`fde3c388ba26f06de68f13ff5831e46061a499d448927888ead4fbfc05fd54cb`.
+A separate three-step Qwen3.5 default run using the new pinned CLI reproduces
+every adapter value of the old binary's calibration run exactly. This bridges
+the covered default-path short comparison; it does not turn the old binary's
+long run into a 300-step run of new optimized paths. The new optimized paths
+have the separate short real-weight matrix above. Optimized long-duration
+training and Gemma long runs remain outside completed qualification.
+
+Raw evidence is under `runs/pr_candidate_soak_20261117_retry/` and
+`runs/optimization_review_20261117/real_matrix_after_soak/`. The completion check
+re-reads status files, all eight HF results, frozen-binary hashes, exact default
+adapter values, Gemma tensors/snapshots and positive offload payload statistics.
 
 A prior real-model streaming diagnostic exceeded its strict `2e-5` adapter bound
 at three of 540,672 coordinates; its failure remains recorded in
