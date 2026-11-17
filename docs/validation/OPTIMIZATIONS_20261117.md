@@ -45,7 +45,7 @@ under `runs/optimization_review_20261117/` and `runs/pr_review_20261117/`.
 | GPT-2 QKV | All eight FP32/Q8 × fused/split QKV × ordinary/streamed cases validate connected Q/K/V gradients and parameter updates. |
 | Qwen CLI | Tiny Qwen2/Qwen3.5 each run 16 memory/head combinations, four native-storage modes, energy exactness, combined-mode adapter resume and invalid-option rejection. WikiText accumulation-tail and MMLU tests pass. |
 | PEFT | 24 native standard/streamed exports loaded and evaluated with upstream PEFT; passed. |
-| Tokenizers | 16 existing five-entrypoint cases, 28 Qwen dense cases and 9 Qwen3.5 cases supplied as external HF golden fixtures; passed. These counts include distinct fixture records, not a claim of unique prompts. |
+| Tokenizers | Three external HF fixture sets execute 16, 28 and 9 records respectively; passed. The mixed sets cover GPT-2 small, Gemma 270M and Qwen dense tokenizers; the third covers Qwen3.5. Sets overlap and these are not counts of unique prompts or all seven model tokenizers. |
 
 Tiny memory-composition comparisons use elementwise gradient `atol=2e-5,
 rtol=1e-4` and trajectory differences below `2e-5`. Direct attention tests also
