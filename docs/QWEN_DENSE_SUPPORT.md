@@ -41,11 +41,15 @@ Both mixers have complete reverse-mode derivatives. `attention_bias=false` and
 
 This is full-sequence **pure-text LoRA training**. Sliding-window layers,
 non-default RoPE scaling, nonzero attention dropout, MoE, and vision/image/video
-inputs are unsupported. Qwen3.5 checkpointing and parameter offload requests are
-explicitly rejected; ordinary/streamed full-attention kernels both work. There
+inputs are unsupported. Full-block activation checkpointing and frozen FP32
+parameter offload cover both mixer types; ordinary/streamed full-attention kernels
+both work. Checkpointing requires zero LoRA dropout; CLI offload also requires
+zero dropout and `--base_weight_storage fp32`. There
 is no incremental KV/conv/recurrent-state cache API. The reference recurrence
 retains `B * H_v * (S+1) * K * V` FP32 state values per linear layer for backward;
-long-sequence memory/performance has not been qualified on phones.
+checkpointing releases internal block state after the forward boundary and
+rebuilds it during backward. Long-sequence memory/performance has not been
+qualified on phones.
 
 ## Model-independent LoRA injection within this graph
 
@@ -206,3 +210,11 @@ Transformers environments and checks both native exports with PEFT. Hybrid
 fixtures include BF16 storage and both supported base tensor namespaces. See
 [PR integration checks](validation/PR_INTEGRATION_20261117.md) and
 [Mac stability runs](MAC_STABILITY.md) for final-candidate qualification.
+
+Both WikiText and MMLU CLIs now use the same `QwenExecutionOptions` parser,
+validation and application path for streamed attention, checkpointing, offload
+and storage policy. `loss_from_hidden(hidden, labels, true)` owns output-head
+residency for streamed LM loss, including offload; callers need not keep a raw
+output-weight alias alive. The pretrained Auto API and CLIs use deferred
+shape-only weights and install the validated checkpoint as one complete load.
+See [support matrix](MODEL_SUPPORT.md) and [optimization validation](validation/OPTIMIZATIONS_20261117.md).

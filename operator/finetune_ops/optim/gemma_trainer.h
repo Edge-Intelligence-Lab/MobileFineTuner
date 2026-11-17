@@ -53,8 +53,9 @@ public:
     float train_step(const Batch& batch);
     float evaluate();
     void save_lora(const std::string& path);
+    int global_step() const { return global_step_; }
 
-private:
+  private:
     GemmaModel& model_;
     GemmaLoraInjector& injector_;
     WikiText2Dataset& train_data_;
@@ -82,6 +83,8 @@ private:
 
     float get_lr(int step);
     void clip_gradients();
+    float finish_accumulation();
+    void clear_failed_step();
 };
 
 }  // namespace ops

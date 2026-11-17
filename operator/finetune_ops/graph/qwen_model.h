@@ -12,6 +12,7 @@
 #include "../nn/lora_linear.h"
 #include "frozen_model_offload.h"
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -82,11 +83,15 @@ struct QwenBlock {
     TensorPtr conv_weight, log_decay, dt_bias, gated_norm_weight;
     std::unique_ptr<LoRALinear> in_qkv_lin, in_z_lin, in_a_lin, in_b_lin, out_lin;
     bool lora_initialized = false;
+    // Architecture identity must survive frozen-weight eviction.
+    bool linear_attention = false;
 };
 
 class QwenModel {
   public:
+    enum class WeightInitialization { Allocate, Deferred };
     explicit QwenModel(const QwenConfig& cfg);
+    QwenModel(const QwenConfig& cfg, WeightInitialization initialization);
     ~QwenModel() = default;
 
     TensorPtr forward_hidden(const TensorPtr& input_ids, const TensorPtr& attention_mask = nullptr);
@@ -94,8 +99,15 @@ class QwenModel {
     TensorPtr forward(const TensorPtr& input_ids, const TensorPtr& attention_mask = nullptr);
     const TensorPtr& embedding_weight() const { return embed_tokens_; }
     const TensorPtr& output_weight() const {
-        return config_.tie_word_embeddings ? embed_tokens_ : lm_head_weight_;
+        const auto& weight = config_.tie_word_embeddings ? embed_tokens_ : lm_head_weight_;
+        if (!weight || !weight->data_ptr())
+            throw std::logic_error(
+                "Output weight is unavailable; complete loading or use the managed head/loss APIs");
+        return weight;
     }
+    // Own the output-weight residency needed by dense or streamed causal loss.
+    TensorPtr loss_from_hidden(const TensorPtr& hidden, const TensorPtr& labels,
+                               bool streamed = false, int ignore_index = -100);
 
     // Complete, shape-checked checkpoint loading; missing weights are errors.
     void load_pretrained(const std::string& model_dir, const SafeTensorsLoadOptions& options);
@@ -136,6 +148,7 @@ class QwenModel {
 
   private:
     QwenConfig config_;
+    bool pretrained_pending_ = false;
     TensorPtr embed_tokens_;      // [vocab, hidden]
     TensorPtr final_norm_weight_; // [hidden]
     TensorPtr lm_head_weight_;    // [vocab, hidden], only for untied heads

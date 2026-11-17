@@ -167,5 +167,20 @@ private:
                            Gradients* collected);
 };
 
+// Process-wide grad mode; use only inside serialized native operations.
+// Evaluation also disables LoRA dropout through the same engine mode.
+class GradModeGuard {
+  public:
+    explicit GradModeGuard(bool enabled) : previous_(Engine::instance().is_enabled()) {
+        Engine::instance().set_enabled(enabled);
+    }
+    ~GradModeGuard() { Engine::instance().set_enabled(previous_); }
+    GradModeGuard(const GradModeGuard&) = delete;
+    GradModeGuard& operator=(const GradModeGuard&) = delete;
+
+  private:
+    bool previous_;
+};
+
 } // namespace autograd
 } // namespace ops

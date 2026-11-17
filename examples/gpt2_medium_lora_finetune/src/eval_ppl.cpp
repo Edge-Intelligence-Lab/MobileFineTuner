@@ -1,3 +1,4 @@
+#include "finetune_ops/core/autograd_engine.h"
 /**
  * @file eval_ppl.cpp
  * @brief WikiText-2 Perplexity Evaluation
@@ -75,6 +76,7 @@ static Args parse_args(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+    ops::autograd::GradModeGuard no_grad(false);
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
 

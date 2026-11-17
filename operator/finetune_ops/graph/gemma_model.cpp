@@ -141,6 +141,10 @@ GemmaTextConfig GemmaTextConfig::from_pretrained(const std::string& model_dir) {
     GemmaTextConfig cfg;
     const std::string path = model_dir + "/config.json";
     const std::string content = read_file(path);
+    const auto model_type = extract_string(content, "model_type");
+    if (model_type != "gemma3_text")
+        throw std::invalid_argument("Gemma text graph requires model_type=gemma3_text; got " +
+                                    model_type);
 
     cfg.vocab_size = extract_int(content, "vocab_size", cfg.vocab_size);
     cfg.hidden_size = extract_int(content, "hidden_size", cfg.hidden_size);

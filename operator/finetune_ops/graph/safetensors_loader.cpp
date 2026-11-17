@@ -173,74 +173,43 @@ TensorPtr SafeTensorsReader::read_tensor_data(const SafeTensorInfo& info, bool t
     }
 
     TensorPtr tensor = std::make_shared<Tensor>(shape, target_dtype, kCPU);
-    auto transpose_buffer_float = [&](float* buffer) {
-        if (!need_transpose) return;
-        int64_t rows = info.shape[0];
-        int64_t cols = info.shape[1];
-        std::vector<float> temp(numel);
-        std::memcpy(temp.data(), buffer, numel * sizeof(float));
-        for (int64_t i = 0; i < rows; ++i) {
-            for (int64_t j = 0; j < cols; ++j) {
-                buffer[j * rows + i] = temp[i * cols + j];
-            }
+    // Convert and transpose directly from the file buffer into the final tensor.
+    // Keeping a second full FP32 transpose buffer can otherwise dominate loading
+    // peak memory for a large vocabulary projection.
+    auto copy_converted = [&](const auto* source, auto* destination, auto convert) {
+        if (!need_transpose) {
+            for (int64_t i = 0; i < numel; ++i)
+                destination[i] = convert(source[i]);
+            return;
         }
+        const int64_t rows = info.shape[0], cols = info.shape[1];
+        constexpr int64_t tile = 32;
+        for (int64_t row = 0; row < rows; row += tile)
+            for (int64_t col = 0; col < cols; col += tile)
+                for (int64_t i = row; i < std::min(row + tile, rows); ++i)
+                    for (int64_t j = col; j < std::min(col + tile, cols); ++j)
+                        destination[j * rows + i] = convert(source[i * cols + j]);
     };
-    auto transpose_buffer_u16 = [&](uint16_t* buffer) {
-        if (!need_transpose) return;
-        int64_t rows = info.shape[0];
-        int64_t cols = info.shape[1];
-        std::vector<uint16_t> temp(static_cast<size_t>(numel));
-        std::memcpy(temp.data(), buffer, static_cast<size_t>(numel) * sizeof(uint16_t));
-        for (int64_t i = 0; i < rows; ++i) {
-            for (int64_t j = 0; j < cols; ++j) {
-                buffer[j * rows + i] = temp[i * cols + j];
-            }
-        }
-    };
-    auto transpose_buffer_i32 = [&](int32_t* buffer) {
-        if (!need_transpose) return;
-        int64_t rows = info.shape[0];
-        int64_t cols = info.shape[1];
-        std::vector<int32_t> temp(static_cast<size_t>(numel));
-        std::memcpy(temp.data(), buffer, static_cast<size_t>(numel) * sizeof(int32_t));
-        for (int64_t i = 0; i < rows; ++i) {
-            for (int64_t j = 0; j < cols; ++j) {
-                buffer[j * rows + i] = temp[i * cols + j];
-            }
-        }
-    };
-
     if (info.dtype == "F32") {
-        std::memcpy(tensor->data<float>(), raw_data.data(), byte_size);
-        transpose_buffer_float(tensor->data<float>());
-    } else if (info.dtype == "F16") {
-        const uint16_t* fp16_data = reinterpret_cast<const uint16_t*>(raw_data.data());
-        if (target_dtype == kFloat16) {
-            std::memcpy(tensor->data<uint16_t>(), fp16_data, byte_size);
-            transpose_buffer_u16(tensor->data<uint16_t>());
-        } else {
-            float* fp32_data = tensor->data<float>();
-            for (int64_t i = 0; i < numel; ++i) {
-                fp32_data[i] = fp16_bits_to_float32(fp16_data[i]);
-            }
-            transpose_buffer_float(fp32_data);
-        }
-    } else if (info.dtype == "BF16") {
-        const uint16_t* bf16_data = reinterpret_cast<const uint16_t*>(raw_data.data());
-        if (target_dtype == kBFloat16) {
-            std::memcpy(tensor->data<uint16_t>(), bf16_data, byte_size);
-            transpose_buffer_u16(tensor->data<uint16_t>());
-        } else {
-            float* fp32_data = tensor->data<float>();
-            for (int64_t i = 0; i < numel; ++i) {
-                uint32_t bits = static_cast<uint32_t>(bf16_data[i]) << 16;
-                std::memcpy(&fp32_data[i], &bits, sizeof(float));
-            }
-            transpose_buffer_float(fp32_data);
-        }
+        copy_converted(reinterpret_cast<const float*>(raw_data.data()), tensor->data<float>(),
+                       [](float value) { return value; });
     } else if (info.dtype == "I32") {
-        std::memcpy(tensor->data<int32_t>(), raw_data.data(), byte_size);
-        transpose_buffer_i32(tensor->data<int32_t>());
+        copy_converted(reinterpret_cast<const int32_t*>(raw_data.data()), tensor->data<int32_t>(),
+                       [](int32_t value) { return value; });
+    } else {
+        const auto* source = reinterpret_cast<const uint16_t*>(raw_data.data());
+        if (target_dtype == kFloat16 || target_dtype == kBFloat16) {
+            copy_converted(source, tensor->data<uint16_t>(), [](uint16_t value) { return value; });
+        } else if (info.dtype == "F16") {
+            copy_converted(source, tensor->data<float>(), fp16_bits_to_float32);
+        } else {
+            copy_converted(source, tensor->data<float>(), [](uint16_t value) {
+                const uint32_t bits = static_cast<uint32_t>(value) << 16;
+                float converted;
+                std::memcpy(&converted, &bits, sizeof(float));
+                return converted;
+            });
+        }
     }
 
     return tensor;

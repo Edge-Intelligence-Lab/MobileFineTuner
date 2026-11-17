@@ -2,8 +2,8 @@
 
 The public Qwen and Gemma C++ models expose three independent switches. All are
 off by default. These are CPU FP32 training paths, not CUDA FlashAttention,
-distributed ZeRO, or optimizer-state sharding. GPT-2 gradient fixes are outside
-this change; its existing smoke tests do not establish full gradient coverage.
+distributed ZeRO, or optimizer-state sharding. GPT-2 exposes streamed attention and its existing Q8_0 workflow; it does not
+expose these model-level checkpoint/offload switches. See the [support matrix](MODEL_SUPPORT.md).
 
 | Feature | Entry point | What is saved / recomputed |
 | --- | --- | --- |
@@ -24,7 +24,7 @@ ctest --test-dir build --output-on-failure \
 The tests check attention against the standard path and finite differences;
 checkpoint gradients with shared/non-leaf dependencies and exception recovery;
 disk round trips and failed/truncated I/O; and every LoRA gradient and parameter
-on tiny Qwen/Gemma models for all eight combinations. Gradients are compared at
+on tiny Qwen2/Qwen3/Gemma models and three Qwen3.5 variants for all eight combinations. Gradients are compared at
 identical parameter snapshots (elementwise `atol=2e-5, rtol=1e-4`); a separate
 three-update free-running trajectory checks loss and adapter differences below
 `2e-5`. The attention primitive also has stricter direct and finite-difference
@@ -79,9 +79,9 @@ the FP32 values. No swapping or privileged OS configuration is performed.
 
 ## Existing training CLIs
 
-The following flags are available in the Qwen **`train_mmlu`** executable and
-both Gemma `train` executables. They are not added to Qwen `train_wikitext` or
-`AutoTrainer` in this change.
+The following flags are available in both Qwen **`train_wikitext` and
+`train_mmlu`** executables and both Gemma `train` executables. Java SDK memory
+configuration is not part of this CLI interface.
 
 ```text
 --activation_checkpointing
@@ -147,3 +147,10 @@ The old five-argument attention signature remains available. With the new
 engine it uses the streaming backward; the legacy engine deliberately retains
 the standard attention training fallback. Qwen/Gemma still create quadratic
 `[S,S]` masks, so O(S) scratch in the kernel is not O(S) total model memory.
+
+Qwen3.5 uses the same stable module inventory for LoRA, checkpoint captures and
+loaded-weight leases. Its complete frozen-weight inventory, including convolution
+and Gated DeltaNet scalar/norm weights, forms offload groups. Streamed LM-head
+loss uses `QwenModel::loss_from_hidden` so an evicted output head is reloaded
+for the loss and released afterward. Checkpointing is full-sequence block replay,
+not incremental recurrent-state caching. See [current validation](validation/OPTIMIZATIONS_20261117.md).

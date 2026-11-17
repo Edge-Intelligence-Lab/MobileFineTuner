@@ -26,6 +26,7 @@
 using namespace ops;
 
 struct Args {
+    QwenExecutionOptions execution;
     std::string model_dir = "Qwen2.5-0.5B";
     std::string data_dir = "data/wikitext2/wikitext-2-raw";
     std::string jsonl_train;
@@ -54,13 +55,14 @@ struct Args {
     std::string output_dir = "outputs/qwen_wikitext";
     std::string dump_first_batch_json;
     bool dump_only = false;
-    std::string base_weight_storage = "auto"; // auto/native: preserve F16/BF16 frozen base weights; fp32: promote all
     std::string pm_schedule; // Opt-in delays after zero-based optimizer updates.
 };
 
 static void parse_args(int argc, char** argv, Args& args) {
     for (int i = 1; i < argc; ++i) {
         std::string k = argv[i];
+        if (args.execution.parse(k, i, argc, argv))
+            continue;
         auto get = [&](const char* name) {
             if (i + 1 >= argc) throw std::runtime_error("arg missing val");
             if (k != name) throw std::runtime_error("unexpected arg");
@@ -99,7 +101,6 @@ static void parse_args(int argc, char** argv, Args& args) {
         else if (k == "--output_dir") args.output_dir = get("--output_dir");
         else if (k == "--dump_first_batch_json") args.dump_first_batch_json = get("--dump_first_batch_json");
         else if (k == "--dump_only") args.dump_only = true;
-        else if (k == "--base_weight_storage") args.base_weight_storage = get("--base_weight_storage");
         else if (k == "--pm_schedule") args.pm_schedule = get("--pm_schedule");
         else
             throw std::invalid_argument("Unknown argument: " + k);
@@ -309,6 +310,7 @@ int main(int argc, char** argv) {
     Args args;
     try {
         parse_args(argc, argv, args);
+        args.execution.validate(args.lora_dropout, args.synthetic_smoke);
         if (args.seq_len < 2 || args.batch_size <= 0 || args.grad_accum_steps <= 0)
             throw std::invalid_argument(
                 "seq_len must be >=2; batch_size and grad_accum_steps must be positive");
@@ -329,11 +331,6 @@ int main(int argc, char** argv) {
             args.loss_impl != "dense" && args.loss_impl != "full_dense" &&
             args.loss_impl != "full_streaming") {
             throw std::runtime_error("--loss_impl must be one of: auto, selected, dense, full_dense, full_streaming");
-        }
-        if (args.base_weight_storage != "auto" &&
-            args.base_weight_storage != "native" &&
-            args.base_weight_storage != "fp32") {
-            throw std::runtime_error("--base_weight_storage must be one of: auto, native, fp32");
         }
         require_file(args.model_dir + "/config.json", "Qwen config");
         if (use_jsonl) {
@@ -378,13 +375,13 @@ int main(int argc, char** argv) {
 
         // 2) config + model
         QwenConfig qcfg = QwenConfig::from_pretrained(args.model_dir + "/config.json");
-        QwenModel model(qcfg);
+        QwenModel model(qcfg, QwenModel::WeightInitialization::Deferred);
 
         // 3) load weights
         SafeTensorsLoadOptions load_opts;
         load_opts.verbose = false;           // disable per-tensor log to avoid flooding
         load_opts.transpose_linear = true;   // HF Linear [out,in] -> internal [in,out]
-        configure_qwen_base_weight_storage(load_opts, args.base_weight_storage);
+        configure_qwen_base_weight_storage(load_opts, args.execution.base_weight_storage);
         model.load_pretrained(args.model_dir, load_opts);
         MemoryManager::instance().clear_unused_memory();
 
@@ -401,6 +398,7 @@ int main(int argc, char** argv) {
         args.lora_alpha = model.lora_alpha();
         args.lora_dropout = model.lora_dropout();
         model.freeze_base();
+        args.execution.apply(model);
         auto lora_params = model.get_lora_parameters();
 
         // 5) dataset
@@ -449,7 +447,11 @@ int main(int argc, char** argv) {
         for (const auto& target : model.lora_targets())
             std::cout << ' ' << target;
         std::cout << std::endl;
-        std::cout << "[Config] Base weight storage: " << args.base_weight_storage << std::endl;
+        std::cout << "[Config] Memory: streamed=" << args.execution.memory_efficient_attention
+                  << " checkpoint=" << args.execution.activation_checkpointing
+                  << " offload=" << !args.execution.offload_dir.empty() << std::endl;
+        std::cout << "[Config] Base weight storage: " << args.execution.base_weight_storage
+                  << std::endl;
         std::cout << "[Config] Shuffle train: " << (args.shuffle_train ? "true" : "false") << std::endl;
         std::cout << "[Config] Seed: " << args.seed << std::endl;
         auto effective_loss_impl = [&]() {
@@ -507,8 +509,7 @@ int main(int argc, char** argv) {
                 (args.loss_impl == "auto" && use_jsonl);
             if (use_streaming_lm_loss) {
                 auto hidden = model.forward_hidden(batch.input_ids, batch.attention_mask);
-                loss = streaming_lm_cross_entropy(hidden, model.output_weight(), batch.labels, -100,
-                                                  "mean");
+                loss = model.loss_from_hidden(hidden, batch.labels, true);
             } else {
                 auto logits = model.forward(batch.input_ids, batch.attention_mask);
                 loss = lm_cross_entropy(logits, batch.labels, -100, "mean");
@@ -621,6 +622,7 @@ int main(int argc, char** argv) {
             // Next batch
             batch = std::move(next_batch);
         }
+        args.execution.report_offload(model, std::cout);
         save_lora_weights_bin(args.output_dir, lora_params);
         model.save_lora_adapter(args.output_dir);
         std::cout << "[Metrics] Step metrics written to "

@@ -36,6 +36,13 @@ void run(const fs::path& root) {
     check(c.head_dim == 6 && !c.attention_bias && c.uses_qk_norm() && !c.tie_word_embeddings,
           "Qwen3 config dispatch");
     check(ModelRegistry::infer_family(root.string()) == ModelFamily::Qwen, "Qwen3 family dispatch");
+    QwenModel deferred(c, QwenModel::WeightInitialization::Deferred);
+    check(deferred.embedding_weight()->data_ptr() == nullptr,
+          "Deferred model allocated embedding storage");
+    rejects([&] { deferred.forward(zeros({1, 3}, kInt32)); });
+    rejects([&] { deferred.init_lora(); });
+    rejects([&] { deferred.load_lora_adapter(root.string()); });
+    rejects([&] { deferred.output_weight(); });
     QwenModel m(c);
     for (auto& p : m.parameters())
         for (int64_t i = 0; i < p->numel(); ++i)
@@ -261,7 +268,34 @@ void hybrid(const fs::path& root) {
                 norm += std::abs(p.second->grad()->data<float>()[i]);
             check(norm > 0, "Hybrid mixer LoRA B gradient is zero");
         }
-    rejects([&] { model.set_activation_checkpointing(true); });
+    // Offload preflight must be atomic and include convolution/state weights.
+    QwenModel budget(c);
+    for (auto& p : budget.parameters())
+        for (int64_t i = 0; i < p->numel(); ++i)
+            p->data<float>()[i] = p->ndim() == 1 ? 0.1f : 0.05f * std::sin(float(i + 1));
+    budget.init_lora(2, 4, 0, std::vector<std::string>{"all-linear"});
+    budget.freeze_base();
+    auto reference = budget.forward(ids);
+    autograd::Engine::instance().clear_graph();
+    auto embedding = budget.embedding_weight();
+    sharding::ShardConfig too_small;
+    too_small.offload_dir = (root / "invalid_hybrid_offload").string();
+    too_small.max_resident_bytes = 1;
+    rejects([&] { budget.enable_parameter_sharding(too_small); });
+    check(budget.embedding_weight() == embedding && budget.get_lora_parameters().size() == 30,
+          "Failed hybrid offload changed active weights or adapters");
+    auto restored = budget.forward(ids);
+    for (int64_t i = 0; i < restored->numel(); ++i)
+        check(restored->data<float>()[i] == reference->data<float>()[i],
+              "Failed hybrid offload modified output");
+    autograd::Engine::instance().clear_graph();
+    model.set_activation_checkpointing(true);
+    QwenModel stochastic(c);
+    stochastic.init_lora(2, 4, 0.1f, false);
+    rejects([&] { stochastic.set_activation_checkpointing(true); });
+    QwenModel checkpointed(c);
+    checkpointed.set_activation_checkpointing(true);
+    rejects([&] { checkpointed.init_lora(2, 4, 0.1f, false); });
     auto invalid = c;
     invalid.linear_num_value_heads = 3;
     invalid.linear_num_key_heads = 2;

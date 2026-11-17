@@ -40,9 +40,11 @@ If you find this project useful, please consider citing our paper.
 
 MobileFineTuner is an open-source C++ framework for practical, privacy-preserving fine-tuning of Large Language Models (LLMs) on mobile-class devices. The current release candidate verifies the stable C++ core, package/export surface, local training entrypoints, and Android native/SDK builds. Full-weight on-phone training requires externally supplied model weights and device-specific validation.
 
-Unlike simulation-based or desktop-bound approaches, MobileFineTuner is built around a lean native C++ implementation that eliminates Python runtime overhead in the training path and supports both Full Fine-Tuning (Full-FT) and Parameter-Efficient Fine-Tuning (PEFT/LoRA) under tight resource constraints.
+Unlike simulation-based or desktop-bound approaches, MobileFineTuner is built around a lean native C++ implementation that eliminates Python runtime overhead in the training path and provides a native autograd foundation with maintained PEFT/LoRA training workflows under resource constraints. Full-FT integrations through the lower-level operators have a separate validation scope.
 
 ### Verified Scope
+
+See the [model × optimization support matrix](docs/MODEL_SUPPORT.md) for implementation scope, entrypoint constraints and validation levels.
 
 - Gemma 270M/1B shared-path regression (2026-11-17): see [real-weight short training and dropout/checkpoint checks](docs/validation/GEMMA_20261117.md).
 
@@ -395,8 +397,9 @@ LoRA uses actual linear-layer shapes and exact target module names, including
 scope, API, CLI flags, and independent Transformers/PEFT checks.
 
 Qwen3.5 support covers pure-text full-sequence LoRA with its default partial RoPE.
-Its vision encoder, image/video inputs, MoE variants, incremental state cache,
-activation checkpointing, and parameter offload are outside this implementation.
+Its vision encoder, image/video inputs, MoE variants,
+and incremental decoding caches are outside this implementation.
+Activation checkpointing and frozen FP32 parameter offload cover both Qwen3.5 mixer types.
 MoE model types are rejected explicitly. Support for one Qwen architecture does not establish
 support for every Qwen-branded checkpoint or every optional attention/RoPE variant.
 

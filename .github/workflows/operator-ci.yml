@@ -12,6 +12,7 @@ on:
       - "scripts/test_qwen_training_cli.py"
       - "scripts/run_qwen_mac_stability.py"
       - "scripts/test_qwen_mac_stability.py"
+      - "scripts/test_qwen_execution_options.py"
       - "scripts/test_energy_scheduler.py"
       - "scripts/check_release_tree.sh"
       - "scripts/check_local_assets.sh"
@@ -32,6 +33,7 @@ on:
       - "scripts/test_qwen_training_cli.py"
       - "scripts/run_qwen_mac_stability.py"
       - "scripts/test_qwen_mac_stability.py"
+      - "scripts/test_qwen_execution_options.py"
       - "scripts/test_energy_scheduler.py"
       - "scripts/check_release_tree.sh"
       - "scripts/check_local_assets.sh"
@@ -178,6 +180,11 @@ jobs:
           cmake --build examples/qwen_lora_finetune/build --target train_mmlu -j2
           python3 scripts/test_qwen_training_cli.py --binary examples/qwen_lora_finetune/build/train_wikitext --mmlu-binary examples/qwen_lora_finetune/build/train_mmlu
 
+      - name: Qwen execution controls
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 scripts/test_qwen_execution_options.py --binary examples/qwen_lora_finetune/build/train_wikitext
+
       - name: Mac stability controller integration
         env:
           PYTHONDONTWRITEBYTECODE: '1'
@@ -225,6 +232,7 @@ jobs:
       - name: Check all logits, adapter gradients, updates and reloads
         env:
           MFT_QWEN_HF_FIXTURES: ${{ github.workspace }}/runs/qwen_hf_fixtures
+          MFT_QWEN_MEMORY_MATRIX: '1'
         run: ctest --test-dir operator/build --output-on-failure
       - name: Load native adapters with PEFT
         env:
@@ -232,3 +240,14 @@ jobs:
         run: python scripts/generate_qwen_hf_fixtures.py --output runs/qwen_hf_fixtures --verify-native
       - name: Exercise CLI accumulation tail and diagnostic exports
         run: python scripts/test_qwen_training_cli.py --binary examples/qwen_lora_finetune/build/train_wikitext --mmlu-binary examples/qwen_lora_finetune/build/train_mmlu
+
+      - name: Exercise execution combinations and output-head residency
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        shell: bash
+        run: |
+          if [ "${{ matrix.architecture }}" = hybrid ]; then
+            python scripts/test_qwen_execution_options.py --binary examples/qwen_lora_finetune/build/train_wikitext --qwen35-base runs/qwen_hf_fixtures/qwen35_native/base
+          else
+            python scripts/test_qwen_execution_options.py --binary examples/qwen_lora_finetune/build/train_wikitext
+          fi

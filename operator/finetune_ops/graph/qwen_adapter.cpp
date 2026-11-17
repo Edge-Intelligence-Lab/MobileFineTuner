@@ -109,6 +109,8 @@ void QwenModel::save_lora_adapter(const std::string& directory) const {
 }
 
 void QwenModel::load_lora_adapter(const std::string& directory) {
+    if (pretrained_pending_)
+        throw std::logic_error("Complete load_pretrained before loading a deferred Qwen adapter");
     namespace fs = std::filesystem;
     if (offload_)
         throw std::logic_error("Load adapters before enabling parameter offload");

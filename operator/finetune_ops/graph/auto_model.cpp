@@ -117,7 +117,9 @@ AutoModelForCausalLM::from_pretrained(const std::string& model_dir,
         }
         case ModelFamily::Qwen: {
             QwenConfig cfg = QwenConfig::from_pretrained(model_dir + "/config.json");
-            model->qwen_ = std::make_unique<QwenModel>(cfg);
+            model->qwen_ = std::make_unique<QwenModel>(
+                cfg, options.load_weights ? QwenModel::WeightInitialization::Deferred
+                                          : QwenModel::WeightInitialization::Allocate);
             break;
         }
         default:
@@ -179,6 +181,8 @@ TensorPtr AutoModelForCausalLM::forward(const TensorPtr& input_ids,
 }
 
 void AutoModelForCausalLM::init_lora(const AutoLoraConfig& config) {
+    if (!spec_.capabilities.causal_lm_lora)
+        throw std::logic_error("LoRA training is unavailable for this model and engine build");
     if (config.rank <= 0 || !std::isfinite(config.alpha) || config.alpha <= 0 ||
         !std::isfinite(config.dropout) || config.dropout < 0 || config.dropout >= 1)
         throw std::invalid_argument("LoRA requires positive rank/alpha and dropout in [0,1)");

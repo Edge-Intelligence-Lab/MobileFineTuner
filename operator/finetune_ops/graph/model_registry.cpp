@@ -47,11 +47,10 @@ ops::ModelFamily family_from_model_type(const std::string& model_type) {
             "Unsupported Qwen model_type: " + model_type +
             ". Supported text architectures: qwen2, qwen3, qwen3_5 and qwen3_5_text.");
     }
-    if (normalized.find("gemma") != std::string::npos) {
+    if (normalized == "gemma3_text") {
         return ops::ModelFamily::Gemma;
     }
-    if (normalized.find("gpt2") != std::string::npos ||
-        normalized.find("gpt_2") != std::string::npos || normalized == "gpt") {
+    if (normalized == "gpt2") {
         return ops::ModelFamily::GPT2;
     }
     return ops::ModelFamily::Unknown;
@@ -89,6 +88,25 @@ std::string to_string(ModelFamily family) {
     return "unknown";
 }
 
+ModelTrainingCapabilities ModelRegistry::capabilities_for(const std::string& model_type) {
+    const auto family = family_from_model_type(model_type);
+    if (family == ModelFamily::Unknown)
+        throw std::invalid_argument("Unsupported model_type: " + model_type);
+    ModelTrainingCapabilities result;
+    result.causal_lm_lora = true;
+    result.standard_peft_adapter_io = family == ModelFamily::Qwen;
+#ifdef USE_NEW_AUTOGRAD_ENGINE
+    result.streamed_attention = true;
+    result.activation_checkpointing = family != ModelFamily::GPT2;
+    result.frozen_parameter_offload = family != ModelFamily::GPT2;
+#else
+    const auto normalized = lowercase(model_type);
+    if (normalized == "qwen3_5" || normalized == "qwen3_5_text")
+        result.causal_lm_lora = false;
+#endif
+    return result;
+}
+
 ModelFamily ModelRegistry::infer_family(const std::string& model_dir) {
     return inspect_pretrained(model_dir).family;
 }
@@ -111,6 +129,7 @@ ModelArchitectureSpec ModelRegistry::inspect_pretrained(const std::string& model
     ModelArchitectureSpec spec;
     spec.family = family;
     spec.model_type = model_type;
+    spec.capabilities = capabilities_for(model_type);
     spec.tie_word_embeddings = parsed.value("tie_word_embeddings", family == ModelFamily::GPT2);
     spec.default_lora_targets = default_lora_targets(family);
 

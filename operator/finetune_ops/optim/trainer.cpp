@@ -4,15 +4,16 @@
  */
 
 #include "trainer.h"
-#include "../data/wikitext2_dataset.h"
+#include "../core/autograd_engine.h"
 #include "../core/lm_loss.h"
-#include "../core/ops.h"
 #include "../core/logger.h"
-#include "../core/performance_monitor.h"
 #include "../core/memory_manager.h"
-#include <iostream>
-#include <cmath>
+#include "../core/ops.h"
+#include "../core/performance_monitor.h"
+#include "../data/wikitext2_dataset.h"
 #include <algorithm>
+#include <cmath>
+#include <iostream>
 
 namespace ops {
 
@@ -146,13 +147,13 @@ float LoRATrainer::train_step(const Batch& batch) {
 }
 
 float LoRATrainer::evaluate() {
+    autograd::GradModeGuard no_grad(false);
     std::cout << "\n[Eval] Running evaluation..." << std::endl;
     
     eval_data_.reset_cursor();
     float total_loss = 0.0f;
     int num_batches = 0;
     
-    // Disable dropout during evaluation (TODO: add mode switch)
     while (true) {
         auto batch = eval_data_.next_batch(config_.micro_batch_size, false);
         if (!batch.input_ids) break;  // no more data

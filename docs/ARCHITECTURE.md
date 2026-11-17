@@ -51,7 +51,8 @@ auto spec = ops::ModelRegistry::inspect_pretrained(model_dir);
 - tokenizer and SafeTensors asset paths;
 - single-file vs sharded SafeTensors availability;
 - default LoRA target names for that family;
-- `tie_word_embeddings` behavior.
+- `tie_word_embeddings` behavior;
+- engine-aware training capabilities, distinct from enabled execution switches.
 
 Load a tokenizer:
 
@@ -212,8 +213,32 @@ fresh optimizer.
 The current autograd engine is process-wide. C++ applications must serialize
 training operations and graph-affecting model calls. The Android bridge does
 this across sessions and synchronizes Java instance lifecycle operations.
-Qwen3.5 has no incremental cache, vision, MoE, checkpointing or parameter-offload
-API. See [Qwen support](QWEN_DENSE_SUPPORT.md) for the precise contract.
+Qwen3.5 supports full-block checkpointing and frozen FP32 parameter offload
+through the shared execution contract. It has no incremental cache, vision or MoE API. See [Qwen support](QWEN_DENSE_SUPPORT.md) for the precise contract.
 
 - [System architecture](../figures/mf-system-architecture.md)
 - [Qwen3.5 text architecture](../figures/mf-qwen35-text-architecture.md)
+
+## Execution contracts and ownership
+
+The discovery layer reports `ModelArchitectureSpec::capabilities`, backed by one
+engine-aware registry. Qwen2/3/3.5 use stable architecture metadata to enumerate
+modules even when weight handles have been evicted. The same inventory drives
+exact LoRA injection, adapter names, checkpoint captures and base-weight leases;
+the complete named weight inventory drives loading validation and offload groups.
+This keeps architectural differences in the model graph rather than copying
+feature-specific lists into each optimization.
+
+Pretrained Qwen construction separates shape metadata from storage allocation.
+Deferred models reject forward and adapter initialization until the complete
+checkpoint validates and installs. The default constructor remains available for
+explicit custom initialization. Streamed LM loss manages its output-head lease
+inside the graph; dataset loops do not reach into offloaded weight ownership.
+
+Both Qwen dataset CLIs share `QwenExecutionOptions`. Shared optimizer clipping
+and `GradModeGuard` own numerical and evaluation policy. Gemma accumulation
+flushes short final groups using the actual count and clears failed-step state.
+Family graphs remain explicit and the native runtime remains serialized.
+
+- [Execution architecture](../figures/mf-execution-contracts.md)
+- [Model support matrix](MODEL_SUPPORT.md)

@@ -6,6 +6,7 @@
 #include "qwen_model.h"
 #include "../../third_party/nlohmann/json.hpp"
 #include "../core/checkpoint.h"
+#include "../core/lm_loss.h"
 #include "../core/memory_efficient_attention.h"
 #include "../core/ops.h"
 #include "../core/qwen35_ops.h"
@@ -229,10 +230,16 @@ QwenConfig QwenConfig::from_pretrained(const std::string& path) {
     return cfg;
 }
 
-QwenModel::QwenModel(const QwenConfig& cfg) : config_(cfg) {
+QwenModel::QwenModel(const QwenConfig& cfg) : QwenModel(cfg, WeightInitialization::Allocate) {}
+
+QwenModel::QwenModel(const QwenConfig& cfg, WeightInitialization initialization) : config_(cfg) {
+    pretrained_pending_ = initialization == WeightInitialization::Deferred;
     config_.validate();
     config_.head_dim = config_.attention_head_dim();
-    auto weight = [](std::vector<int64_t> shape) {
+    auto weight = [initialization](std::vector<int64_t> shape) {
+        if (initialization == WeightInitialization::Deferred)
+            return std::make_shared<Tensor>(shape, static_cast<void*>(nullptr), kFloat32, kCPU,
+                                            true);
         return std::make_shared<Tensor>(shape, kFloat32, kCPU);
     };
     embed_tokens_ = weight({cfg.vocab_size, cfg.hidden_size});
@@ -244,6 +251,7 @@ QwenModel::QwenModel(const QwenConfig& cfg) : config_(cfg) {
     const int64_t kvout = int64_t(cfg.num_key_value_heads) * config_.head_dim;
     for (size_t i = 0; i < layers_.size(); ++i) {
         auto& b = layers_[i];
+        b.linear_attention = config_.linear_layer(i);
         b.input_norm_weight = weight({cfg.hidden_size});
         b.post_norm_weight = weight({cfg.hidden_size});
         if (config_.linear_layer(i)) {
@@ -283,7 +291,7 @@ QwenModel::QwenModel(const QwenConfig& cfg) : config_(cfg) {
 
 std::vector<QwenModel::LinearModule> QwenModel::linear_modules(QwenBlock& b) {
     std::vector<LinearModule> modules;
-    if (b.in_proj_qkv_weight)
+    if (b.linear_attention)
         modules = {{"in_proj_qkv", "linear_attn", &b.in_proj_qkv_weight, nullptr, &b.in_qkv_lin},
                    {"in_proj_z", "linear_attn", &b.in_proj_z_weight, nullptr, &b.in_z_lin},
                    {"in_proj_a", "linear_attn", &b.in_proj_a_weight, nullptr, &b.in_a_lin},
@@ -402,6 +410,7 @@ void QwenModel::load_pretrained(const std::string& directory,
         validate_qwen_weight(item.first, item.second, *slots.at(item.first));
     for (const auto& item : tensors)
         *slots.at(item.first) = item.second;
+    pretrained_pending_ = false;
 }
 
 // -------------- LoRA --------------
@@ -413,6 +422,9 @@ void QwenModel::init_lora(int rank, float alpha, float dropout, bool qv_only, ui
 
 void QwenModel::init_lora(int rank, float alpha, float dropout,
                           const std::vector<std::string>& requested, uint64_t seed) {
+    if (pretrained_pending_)
+        throw std::logic_error(
+            "Complete load_pretrained before initializing a deferred Qwen model");
     if (offload_)
         throw std::logic_error("initialize LoRA before enabling parameter offload");
     if (lora_rank_)
@@ -688,6 +700,8 @@ TensorPtr QwenModel::mlp(const TensorPtr& x, QwenBlock& blk) {
 
 // -------------- 前向 --------------
 TensorPtr QwenModel::forward_hidden(const TensorPtr& input_ids, const TensorPtr& attention_mask) {
+    if (pretrained_pending_)
+        throw std::logic_error("Complete load_pretrained before using a deferred Qwen model");
     if (!input_ids || input_ids->dtype() != kInt32 || input_ids->ndim() != 2 ||
         input_ids->shape()[0] <= 0 || input_ids->shape()[1] <= 0 ||
         input_ids->shape()[1] > config_.max_position_embeddings)
@@ -743,13 +757,9 @@ TensorPtr QwenModel::forward_hidden(const TensorPtr& input_ids, const TensorPtr&
                 offload_->load(static_cast<size_t>(i) + 2);
             auto& blk = layers_[i];
             OffloadLinearLease lease{bool(offload_)};
-            lease.bind(blk.q_lin.get(), blk.q_proj_weight, blk.q_proj_bias);
-            lease.bind(blk.k_lin.get(), blk.k_proj_weight, blk.k_proj_bias);
-            lease.bind(blk.v_lin.get(), blk.v_proj_weight, blk.v_proj_bias);
-            lease.bind(blk.o_lin.get(), blk.o_proj_weight, blk.o_proj_bias);
-            lease.bind(blk.gate_lin.get(), blk.gate_proj_weight);
-            lease.bind(blk.up_lin.get(), blk.up_proj_weight);
-            lease.bind(blk.down_lin.get(), blk.down_proj_weight);
+            for (const auto& module : linear_modules(blk))
+                lease.bind(module.adapter->get(), *module.weight,
+                           module.bias ? *module.bias : nullptr);
             auto x = input;
             auto normed = norm(x, blk.input_norm_weight);
             auto attn_out = config_.linear_layer(i)
@@ -769,12 +779,10 @@ TensorPtr QwenModel::forward_hidden(const TensorPtr& input_ids, const TensorPtr&
             return x;
         };
         std::vector<TensorPtr> captures;
-        for (auto* lin : {layers_[i].q_lin.get(), layers_[i].k_lin.get(), layers_[i].v_lin.get(),
-                          layers_[i].o_lin.get(), layers_[i].gate_lin.get(),
-                          layers_[i].up_lin.get(), layers_[i].down_lin.get()})
-            if (lin) {
-                auto p = lin->trainable_parameters();
-                captures.insert(captures.end(), p.begin(), p.end());
+        for (const auto& module : linear_modules(layers_[i]))
+            if (*module.adapter) {
+                auto params = (*module.adapter)->trainable_parameters();
+                captures.insert(captures.end(), params.begin(), params.end());
             }
         x = activation_checkpointing_ ? checkpoint(block_forward, x, captures) : block_forward(x);
         if (offload_)
@@ -797,6 +805,25 @@ TensorPtr QwenModel::lm_head(const TensorPtr& hidden) {
     return output;
 }
 
+TensorPtr QwenModel::loss_from_hidden(const TensorPtr& hidden, const TensorPtr& labels,
+                                      bool streamed, int ignore_index) {
+    if (!streamed)
+        return lm_cross_entropy(lm_head(hidden), labels, ignore_index, "mean");
+    if (offload_)
+        offload_->load(0);
+    try {
+        auto loss =
+            streaming_lm_cross_entropy(hidden, output_weight(), labels, ignore_index, "mean");
+        if (offload_)
+            offload_->offload_all();
+        return loss;
+    } catch (...) {
+        if (offload_)
+            offload_->offload_all();
+        throw;
+    }
+}
+
 TensorPtr QwenModel::forward(const TensorPtr& input_ids, const TensorPtr& attention_mask) {
     return lm_head(forward_hidden(input_ids, attention_mask));
 }
@@ -806,53 +833,48 @@ void QwenModel::set_activation_checkpointing(bool enabled) {
     if (enabled)
         throw std::logic_error("activation checkpointing requires the new autograd engine");
 #endif
-    if (enabled && config_.hybrid())
-        throw std::invalid_argument("Qwen3.5 activation checkpointing is not yet supported");
     if (enabled && lora_dropout_ > 0)
         throw std::invalid_argument("Qwen checkpointing requires zero LoRA dropout");
     activation_checkpointing_ = enabled;
 }
 
 void QwenModel::enable_parameter_sharding(const sharding::ShardConfig& config) {
-    if (config_.hybrid())
-        throw std::invalid_argument("Qwen3.5 parameter offload is not yet supported");
+#ifndef USE_NEW_AUTOGRAD_ENGINE
+    (void)config;
+    throw std::logic_error("parameter offload requires the new autograd engine");
+#else
     if (offload_)
         throw std::logic_error("parameter offload already enabled");
-    std::vector<FrozenModelOffload::Group> groups{{&embed_tokens_}, {&final_norm_weight_}};
-    if (lm_head_weight_)
-        groups[0].push_back(&lm_head_weight_);
-    for (auto& b : layers_) {
-        if (!b.lora_initialized)
+    for (auto& block : layers_) {
+        if (!block.lora_initialized)
             throw std::logic_error("initialize LoRA before offload");
-        for (auto* lin : {b.q_lin.get(), b.k_lin.get(), b.v_lin.get(), b.o_lin.get(),
-                          b.gate_lin.get(), b.up_lin.get(), b.down_lin.get(), b.in_qkv_lin.get(),
-                          b.in_z_lin.get(), b.in_a_lin.get(), b.in_b_lin.get(), b.out_lin.get()})
-            if (lin && lin->is_merged())
+        for (const auto& module : linear_modules(block))
+            if (*module.adapter && (*module.adapter)->is_merged())
                 throw std::logic_error("unmerge LoRA before offload");
-        groups.push_back({&b.input_norm_weight, &b.post_norm_weight, &b.q_proj_weight,
-                          &b.q_proj_bias, &b.k_proj_weight, &b.k_proj_bias, &b.v_proj_weight,
-                          &b.v_proj_bias, &b.o_proj_weight, &b.gate_proj_weight, &b.up_proj_weight,
-                          &b.down_proj_weight});
     }
-    for (size_t i = 0; i < layers_.size(); ++i) {
-        if (layers_[i].q_norm_weight)
-            groups[i + 2].push_back(&layers_[i].q_norm_weight);
-        if (layers_[i].k_norm_weight)
-            groups[i + 2].push_back(&layers_[i].k_norm_weight);
-        if (layers_[i].o_proj_bias)
-            groups[i + 2].push_back(&layers_[i].o_proj_bias);
-        auto& group = groups[i + 2];
-        group.erase(std::remove_if(group.begin(), group.end(), [](TensorPtr* p) { return !*p; }),
-                    group.end());
+    // Loading, validation and offload share one complete weight inventory.
+    // Group 0: embedding/head; 1: final norm; remaining groups: whole blocks.
+    std::vector<FrozenModelOffload::Group> groups(layers_.size() + 2);
+    auto slots = weight_slots();
+    std::vector<std::string> names;
+    for (const auto& item : slots)
+        names.push_back(item.first);
+    std::sort(names.begin(), names.end());
+    for (const auto& name : names) {
+        size_t group = 0;
+        if (name == "final_norm.weight")
+            group = 1;
+        else if (name.rfind("layers.", 0) == 0)
+            group = static_cast<size_t>(std::stoul(name.substr(7))) + 2;
+        groups.at(group).push_back(slots.at(name));
     }
     offload_ = std::make_unique<FrozenModelOffload>(config, groups);
-    for (auto& b : layers_)
-        for (auto* lin : {b.q_lin.get(), b.k_lin.get(), b.v_lin.get(), b.o_lin.get(),
-                          b.gate_lin.get(), b.up_lin.get(), b.down_lin.get(), b.in_qkv_lin.get(),
-                          b.in_z_lin.get(), b.in_a_lin.get(), b.in_b_lin.get(), b.out_lin.get()})
-            if (lin)
-                lin->set_base_weights(nullptr);
+    for (auto& block : layers_)
+        for (const auto& module : linear_modules(block))
+            if (*module.adapter)
+                (*module.adapter)->set_base_weights(nullptr);
     offload_->offload_all();
+#endif
 }
 
 } // namespace ops

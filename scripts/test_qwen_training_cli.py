@@ -128,6 +128,19 @@ def test_mmlu(binary, root, model):
     for name, extra in [
         ("mmlu_train", []),
         ("mmlu_resume", ["--resume_from", str(root / "mmlu_train")]),
+        (
+            "mmlu_memory",
+            [
+                "--base_weight_storage",
+                "fp32",
+                "--activation_checkpointing",
+                "--memory_efficient_attention",
+                "--offload_dir",
+                str(root / "mmlu_offload"),
+                "--offload_resident_mb",
+                "8",
+            ],
+        ),
     ]:
         result = subprocess.run(
             common
@@ -166,6 +179,11 @@ def test_mmlu(binary, root, model):
         assert len(tensors) == 14
         adapters.append(tensors)
     assert all(adapters[0][key] != adapters[1][key] for key in adapters[0])
+    for key in adapters[0]:
+        for baseline, optimized in zip(adapters[0][key], adapters[2][key]):
+            assert abs(baseline - optimized) <= 2e-5 + 3e-4 * max(
+                abs(baseline), abs(optimized)
+            )
     result = subprocess.run(
         common
         + [

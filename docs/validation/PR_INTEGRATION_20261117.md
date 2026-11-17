@@ -1,5 +1,7 @@
 # PR integration audit — 2026-11-17
 
+Historical validation snapshot; subsequent architecture/optimization changes and current qualification limits are recorded in [the follow-up validation](OPTIMIZATIONS_20261117.md).
+
 Baseline: `be95a289d9cd5ecd93b6fab7fdc3c4551c3f9fb1` (upstream main at audit).
 This record covers the candidate reviewed on `validation/macos-20261114`.
 It records local acceptance checks; upstream review and hosted CI are separate

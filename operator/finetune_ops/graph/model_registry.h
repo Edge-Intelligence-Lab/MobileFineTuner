@@ -14,6 +14,16 @@ enum class ModelFamily {
 
 std::string to_string(ModelFamily family);
 
+// C++ graph capabilities, not CLI flags or a device-memory guarantee.
+// Availability is reported for the engine variant in this library build.
+struct ModelTrainingCapabilities {
+    bool causal_lm_lora = false;
+    bool streamed_attention = false;
+    bool activation_checkpointing = false;
+    bool frozen_parameter_offload = false;
+    bool standard_peft_adapter_io = false;
+};
+
 struct ModelAssetPaths {
     std::string model_dir;
     std::string config_json_path;
@@ -36,12 +46,14 @@ struct ModelArchitectureSpec {
     ModelAssetPaths assets;
     std::vector<std::string> default_lora_targets;
     bool tie_word_embeddings = false;
+    ModelTrainingCapabilities capabilities{};
 };
 
 class ModelRegistry {
 public:
     static ModelArchitectureSpec inspect_pretrained(const std::string& model_dir);
     static ModelFamily infer_family(const std::string& model_dir);
+    static ModelTrainingCapabilities capabilities_for(const std::string& model_type);
 };
 
 }  // namespace ops

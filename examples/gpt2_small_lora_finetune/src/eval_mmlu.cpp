@@ -1,9 +1,10 @@
-#include <iostream>
+#include "finetune_ops/core/autograd_engine.h"
+#include <algorithm>
+#include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <string>
 #include <vector>
-#include <cstdlib>
-#include <algorithm>
 
 #include "finetune_ops/graph/gpt2_model.h"
 #include "finetune_ops/graph/safetensors_loader.h"
@@ -58,6 +59,7 @@ static Args parse_args(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+    ops::autograd::GradModeGuard no_grad(false);
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
 

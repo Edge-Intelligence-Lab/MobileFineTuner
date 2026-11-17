@@ -1,9 +1,11 @@
 #include "../../third_party/nlohmann/json.hpp"
 #include "../core/autograd_engine.h"
 #include "../core/lm_loss.h"
+#include "../core/memory_manager.h"
 #include "../core/ops.h"
 #include "../optim/adam.h"
 #include "auto_model.h"
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -32,9 +34,12 @@ double compare(const TensorPtr& got, const TensorPtr& expected, const std::strin
     return maximum;
 }
 
-void run(const fs::path& path, bool streaming) {
+void run(const fs::path& path, bool streaming, int memory_profile = 0) {
     auto& engine = autograd::Engine::instance();
     engine.clear_graph();
+    // Each profile owns a fresh model. Release unused pool blocks from the
+    // preceding profile before allocating a differently sized/typed base.
+    MemoryManager::instance().clear_unused_memory();
     engine.set_enabled(true);
     std::ifstream protocol_file(path / "protocol.json");
     const auto protocol = nlohmann::json::parse(protocol_file);
@@ -49,7 +54,7 @@ void run(const fs::path& path, bool streaming) {
     SafeTensorsReader ref((path / "reference.safetensors").string());
     ref.parse_header();
     AutoModelLoadOptions load_options;
-    const bool native_storage = protocol.value("native_storage", false);
+    const bool native_storage = protocol.value("native_storage", false) && !(memory_profile & 4);
     load_options.safetensors_options.auto_promote_fp16 = !native_storage;
     auto model = AutoModelForCausalLM::from_pretrained((path / "base").string(), load_options);
     auto& qwen = *model->qwen();
@@ -60,6 +65,19 @@ void run(const fs::path& path, bool streaming) {
     qwen.freeze_base();
     qwen.set_training(false);
     qwen.set_memory_efficient_attention(streaming);
+    qwen.set_activation_checkpointing((memory_profile & 2) != 0);
+    fs::path offload_root;
+    if (memory_profile & 4) {
+        sharding::ShardConfig config;
+        offload_root =
+            path / ("offload_test_" +
+                    std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        config.offload_dir = offload_root.string();
+        config.max_resident_bytes = size_t(2048) * 1024 * 1024;
+        const auto frozen_count = qwen.parameters().size();
+        qwen.enable_parameter_sharding(config);
+        check(qwen.sharding_stats().entries == frozen_count, "Offload omitted frozen weights");
+    }
     auto logits = model->forward(ids, mask);
     // Full-size FP32 GEMM reductions accumulate more error than tiny cases.
     double logit_error = compare(logits, ref.load_tensor("logits"), "logits",
@@ -119,45 +137,72 @@ void run(const fs::path& path, bool streaming) {
         auto expected = model->forward(ids, mask);
         compare(expected, ref.load_tensor("after_logits"), "post-update logits",
                 full_size ? 1e-3f : 3e-5f, full_size ? 1e-4f : 3e-4f);
-        const auto saved = path / (streaming ? "native_streamed" : "native_standard");
+        const auto suffix =
+            memory_profile ? "_memory" + std::to_string(memory_profile) : std::string();
+        const auto saved = path / ((streaming ? "native_streamed" : "native_standard") + suffix);
         qwen.save_lora_adapter(saved.string());
-        qwen.load_lora_adapter(saved.string());
-        qwen.freeze_base();
-        qwen.set_training(false);
-        compare(model->forward(ids, mask), expected, "native adapter reload", 1e-7f, 1e-6f);
-        // Load a post-update PEFT checkpoint into the same native base.
-        qwen.load_lora_adapter((path / "after").string());
-        qwen.freeze_base();
-        qwen.set_training(false);
-        compare(model->forward(ids, mask), expected, "PEFT post-update adapter",
-                full_size ? 1e-3f : 3e-5f, full_size ? 1e-4f : 3e-4f);
-        const auto before_bad_load = model->forward(ids, mask);
-        const auto bad = path / "invalid_adapter";
-        fs::create_directories(bad);
-        std::ifstream config_file(path / "initial/adapter_config.json");
-        auto config = nlohmann::json::parse(config_file);
-        config["r"] = config["r"].get<int>() + 1;
-        {
-            std::ofstream file(bad / "adapter_config.json");
-            file << config.dump();
+        if (!(memory_profile & 4)) {
+            qwen.load_lora_adapter(saved.string());
+            qwen.freeze_base();
+            qwen.set_training(false);
+            compare(model->forward(ids, mask), expected, "native adapter reload", 1e-7f, 1e-6f);
+            // Load a post-update PEFT checkpoint into the same native base.
+            qwen.load_lora_adapter((path / "after").string());
+            qwen.freeze_base();
+            qwen.set_training(false);
+            compare(model->forward(ids, mask), expected, "PEFT post-update adapter",
+                    full_size ? 1e-3f : 3e-5f, full_size ? 1e-4f : 3e-4f);
+            const auto before_bad_load = model->forward(ids, mask);
+            const auto bad = path / "invalid_adapter";
+            fs::create_directories(bad);
+            std::ifstream config_file(path / "initial/adapter_config.json");
+            auto config = nlohmann::json::parse(config_file);
+            config["r"] = config["r"].get<int>() + 1;
+            {
+                std::ofstream file(bad / "adapter_config.json");
+                file << config.dump();
+            }
+            fs::copy_file(path / "initial/adapter_model.safetensors",
+                          bad / "adapter_model.safetensors", fs::copy_options::overwrite_existing);
+            bool rejected = false;
+            try {
+                qwen.load_lora_adapter(bad.string());
+            } catch (const std::exception&) {
+                rejected = true;
+            }
+            check(rejected, "Incompatible adapter rank was accepted");
+            compare(model->forward(ids, mask), before_bad_load,
+                    "failed adapter load changed active model", 1e-7f, 1e-6f);
+        } else {
+            bool rejected = false;
+            try {
+                qwen.load_lora_adapter(saved.string());
+            } catch (const std::exception&) {
+                rejected = true;
+            }
+            check(rejected, "Offloaded adapter replacement must reject stale ownership");
+            compare(model->forward(ids, mask), expected, "offload export/rejection changed output",
+                    1e-7f, 1e-6f);
         }
-        fs::copy_file(path / "initial/adapter_model.safetensors", bad / "adapter_model.safetensors",
-                      fs::copy_options::overwrite_existing);
-        bool rejected = false;
-        try {
-            qwen.load_lora_adapter(bad.string());
-        } catch (const std::exception&) {
-            rejected = true;
-        }
-        check(rejected, "Incompatible adapter rank was accepted");
-        compare(model->forward(ids, mask), before_bad_load,
-                "failed adapter load changed active model", 1e-7f, 1e-6f);
     }
-    std::cout << path.filename().string() << " streaming=" << streaming
-              << " logits_max_abs=" << logit_error << " grad_max_abs=" << grad_error
-              << " optimizer=" << optimizer_kind << " update_max_abs=" << update_error << " PASS\n";
+    if (memory_profile & 4) {
+        const auto io = qwen.sharding_stats();
+        check(io.loads > io.entries && io.evictions > io.entries && io.bytes_read > 0 &&
+                  io.writes == io.entries,
+              "Offload did not perform actual frozen-weight reloads");
+        std::cout << "Offload entries=" << io.entries << " loads=" << io.loads
+                  << " bytes_read=" << io.bytes_read << " bytes_written=" << io.bytes_written
+                  << '\n';
+    }
+    std::cout << path.filename().string() << " memory_profile=" << memory_profile
+              << " streaming=" << streaming << " logits_max_abs=" << logit_error
+              << " grad_max_abs=" << grad_error << " optimizer=" << optimizer_kind
+              << " update_max_abs=" << update_error << " PASS\n";
     engine.clear_graph();
     engine.set_enabled(true);
+    model.reset();
+    if (!offload_root.empty())
+        fs::remove_all(offload_root);
 }
 } // namespace
 int main(int argc, char** argv) try {
@@ -173,6 +218,11 @@ int main(int argc, char** argv) try {
         if (fs::exists(entry.path() / "protocol.json")) {
             run(entry.path(), false);
             run(entry.path(), true);
+            if (std::getenv("MFT_QWEN_MEMORY_MATRIX"))
+                for (int profile : {2, 4, 6}) {
+                    run(entry.path(), false, profile);
+                    run(entry.path(), true, profile);
+                }
             ++cases;
         }
     check(cases > 0, "No Qwen HF fixtures found");

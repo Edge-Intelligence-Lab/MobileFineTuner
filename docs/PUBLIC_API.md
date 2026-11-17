@@ -118,3 +118,25 @@ serializes native entrypoints across sessions; Java instance operations also
 synchronize close with active calls. Run training on a worker thread because
 close can wait for an active step. Device concurrency tests are included in the
 instrumentation suite and require a connected device to execute.
+
+## Capability discovery and managed Qwen loss
+
+`ModelRegistry::capabilities_for(model_type)` and `inspect_pretrained(...).capabilities`
+report the library build's C++ graph features. The registry accepts implemented
+architecture types rather than arbitrary family-name substrings. This declaration
+does not claim that every CLI/SDK exposes every switch or that a device has
+sufficient memory; see [the support matrix](MODEL_SUPPORT.md).
+
+Qwen3.5 checkpointing covers full decoder blocks and requires zero LoRA dropout.
+Frozen parameter offload covers all mixer/MLP/base weights and requires frozen
+CPU FP32 storage. For a streamed vocabulary head, use
+`model->qwen()->loss_from_hidden(hidden, labels, true)` so the output matrix is
+resident during loss construction. Raw `output_weight()` access rejects absent
+or deferred storage rather than returning an unusable handle.
+
+The Qwen pretrained path uses `WeightInitialization::Deferred`: declared shapes
+exist before storage is loaded, but forward and adapter setup reject until
+`load_pretrained` completes. Custom direct construction retains its original
+allocation policy. `autograd::GradModeGuard(false)` is the shared scoped evaluation
+mode; it restores the prior engine state and disables adapter dropout for eval.
+It remains process-wide and requires serialized use.

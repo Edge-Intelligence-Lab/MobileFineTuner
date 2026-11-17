@@ -1,6 +1,6 @@
-#include "../graph/qwen_model.h"
-#include "../graph/gemma_model.h"
 #include "../graph/gemma_lora_injector.h"
+#include "../graph/gemma_model.h"
+#include "../graph/qwen_model.h"
 #include "../optim/adam.h"
 #include "autograd_engine.h"
 #include "lm_loss.h"
@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <type_traits>
 
 using namespace ops;
 namespace {
@@ -34,16 +35,25 @@ void adapters(const std::vector<TensorPtr>& params) {
     for(size_t n=0;n<params.size();++n) for(int64_t i=0;i<params[n]->numel();++i)
         params[n]->data<float>()[i]=.02f*std::cos(float(i+n+1));
 }
-struct Observation {float loss;std::vector<TensorPtr> grads,params;};
-template<class Model> std::vector<Observation> run(Model& model,int mode,const std::filesystem::path& directory,
-                                                  const std::vector<Observation>* aligned=nullptr) {
+struct Observation {
+    float loss;
+    std::vector<TensorPtr> grads, params;
+    size_t graph_nodes = 0;
+};
+template <class Model>
+std::vector<Observation> run(Model& model, int mode, const std::filesystem::path& directory,
+                             const std::vector<Observation>* aligned = nullptr,
+                             bool streamed_head = false) {
     auto params=model.get_lora_parameters();adapters(params);
     model.set_memory_efficient_attention((mode&1)!=0);
     model.set_activation_checkpointing((mode&2)!=0);
+    const auto frozen_count = model.parameters().size();
     if(mode&4) {
         sharding::ShardConfig cfg;cfg.offload_dir=directory.string();cfg.max_resident_bytes=8192;
         model.enable_parameter_sharding(cfg);
         require(model.sharding_stats().resident_bytes==0,"initial offload did not release managed owners");
+        require(model.sharding_stats().entries == frozen_count,
+                "offload inventory omitted frozen weights");
     }
     auto ids=zeros({2,5},kInt32),labels=zeros({2,5},kInt32),mask=ones({2,5});
     for(int i=0;i<10;++i) {ids->data<int32_t>()[i]=(i+1)%31;labels->data<int32_t>()[i]=(i+2)%31;}
@@ -60,10 +70,19 @@ template<class Model> std::vector<Observation> run(Model& model,int mode,const s
             std::copy((*aligned)[step-1].params[p]->data<float>(),
                       (*aligned)[step-1].params[p]->data<float>()+params[p]->numel(),params[p]->template data<float>());
         for(auto& p:params)p->zero_grad();
-        auto logits=model.forward(ids,mask);
-        auto loss=lm_cross_entropy(logits,labels);
+        TensorPtr loss;
+        if constexpr (std::is_same<Model, QwenModel>::value) {
+            if (streamed_head)
+                loss = model.loss_from_hidden(model.forward_hidden(ids, mask), labels, true);
+        }
+        if (!loss)
+            loss = lm_cross_entropy(model.forward(ids, mask), labels);
+        auto graph = autograd::Engine::instance().take_state();
+        const auto graph_nodes = graph.nodes.size();
+        autograd::Engine::instance().restore_state(std::move(graph));
         loss->backward();
         Observation result;result.loss=loss->template data<float>()[0];
+        result.graph_nodes = graph_nodes;
         std::vector<TensorPtr> grads;
         for(auto& p:params){require(bool(p->grad()),"LoRA gradient missing");grads.push_back(p->grad());result.grads.push_back(p->grad()->clone());}
         optimizer.step(params,grads);
@@ -119,6 +138,7 @@ int main() try {
     q3.attention_bias = false;
     q3.tie_word_embeddings = false;
     std::vector<Observation> qref, gref, q3ref;
+    std::vector<Observation> hybrid_refs[3];
     for(int mode=0;mode<8;++mode) {
         QwenModel qm(q);base(qm);qm.init_lora(2,4,0,false,42);
         auto qr=run(qm,mode,dir);if(!mode)qref=qr;else check(qref,qr,"Qwen trajectory mode="+std::to_string(mode),!(mode&1));
@@ -133,6 +153,60 @@ int main() try {
             q3ref = q3r;
         else
             check(q3ref, q3r, "Qwen3 trajectory mode=" + std::to_string(mode), !(mode & 1));
+        for (int variant = 0; variant < 3; ++variant) {
+            QwenConfig h = q;
+            h.model_type = "qwen3_5_text";
+            h.attention_bias = false;
+            h.head_dim = 8;
+            h.tie_word_embeddings = variant != 1;
+            h.linear_num_key_heads = 1;
+            h.linear_num_value_heads = 2;
+            h.linear_key_head_dim = 3;
+            h.linear_value_head_dim = 4;
+            h.linear_conv_kernel_dim = 3;
+            h.partial_rotary_factor = 0.5f;
+            h.layer_types = variant == 0
+                                ? std::vector<std::string>{"linear_attention", "full_attention"}
+                                : std::vector<std::string>{"full_attention", "linear_attention",
+                                                           "linear_attention"};
+            h.num_hidden_layers = int(h.layer_types.size());
+            const std::vector<std::string> targets = variant == 2
+                                                         ? std::vector<std::string>{"q_proj"}
+                                                         : std::vector<std::string>{"all-linear"};
+            QwenModel hybrid(h);
+            base(hybrid);
+            hybrid.init_lora(2, 4, 0, targets, 42);
+            auto candidate = run(hybrid, mode, dir);
+            const std::string name =
+                "Qwen3.5 variant=" + std::to_string(variant) + " mode=" + std::to_string(mode);
+            if (!mode)
+                hybrid_refs[variant] = candidate;
+            else
+                check(hybrid_refs[variant], candidate, name, !(mode & 1));
+            if (mode & 2) {
+                require(candidate.front().graph_nodes < hybrid_refs[variant].front().graph_nodes,
+                        "Hybrid checkpointing did not reduce retained autograd nodes");
+                std::cout << name << " graph_nodes=" << candidate.front().graph_nodes
+                          << " baseline_nodes=" << hybrid_refs[variant].front().graph_nodes << '\n';
+            }
+            require(hybrid.named_lora_parameters().size() == hybrid.get_lora_parameters().size(),
+                    "Offload changed hybrid adapter inventory");
+            hybrid.save_lora_adapter(
+                (dir / ("adapter_" + std::to_string(variant) + "_" + std::to_string(mode)))
+                    .string());
+            QwenModel streamed(h);
+            base(streamed);
+            streamed.init_lora(2, 4, 0, targets, 42);
+            check(hybrid_refs[variant], run(streamed, mode, dir, nullptr, true),
+                  name + " streamed-head", !(mode & 1));
+            if (mode & 1) {
+                QwenModel aligned(h);
+                base(aligned);
+                aligned.init_lora(2, 4, 0, targets, 42);
+                check(hybrid_refs[variant], run(aligned, mode, dir, &hybrid_refs[variant]),
+                      name + " identical-input");
+            }
+        }
         if(mode&1) {
             QwenModel qa(q);base(qa);qa.init_lora(2,4,0,false,42);
             check(qref,run(qa,mode,dir,&qref),"Qwen identical-input mode="+std::to_string(mode));
@@ -146,6 +220,7 @@ int main() try {
         }
     }
     std::filesystem::remove_all(dir);
-    std::cout << "PASS: Qwen2/Qwen3/Gemma, eight combinations, three Adam updates and "
+    std::cout << "PASS: Qwen2/Qwen3/Gemma and three Qwen3.5 variants, eight combinations, three "
+                 "Adam updates and "
                  "identical-input gradient checks\n";
 } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
