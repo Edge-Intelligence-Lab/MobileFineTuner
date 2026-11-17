@@ -44,7 +44,7 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +60,7 @@ jobs:
           if [ ! -x "$SDKMANAGER" ]; then
             SDKMANAGER="sdkmanager"
           fi
-          yes | "$SDKMANAGER" \
+          (yes || true) | "$SDKMANAGER" \
             "platforms;android-35" \
             "build-tools;35.0.0" \
             "cmake;3.22.1" \
