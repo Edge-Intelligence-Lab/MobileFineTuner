@@ -44,6 +44,8 @@ Unlike simulation-based or desktop-bound approaches, MobileFineTuner is built ar
 
 ### Verified Scope
 
+- Gemma 270M/1B shared-path regression (2026-11-17): see [real-weight short training and dropout/checkpoint checks](docs/validation/GEMMA_20261117.md).
+
 - PR integration audit (2026-11-17): see [integration checks](docs/validation/PR_INTEGRATION_20261117.md) and the [Mac stability runner](docs/MAC_STABILITY.md). Final candidate long-run and physical-device results are tracked separately.
 
 - Mac regression (2026-11-14, Apple M2): see [validation notes](docs/validation/MACOS_20261114.md) for the tested revision, commands, results, and Android checks still pending.
