@@ -83,10 +83,50 @@ speedup. The initial prescan still tokenizes the split once. Its logs, commands,
 binary hashes and comparison status remain in
 `runs/optimized_soak_20261118/loader_comparison/`.
 
-A fresh pinned Gemma270M/1B combined queue is prepared under
-`runs/optimized_soak_20261118_gemma_indexed/gemma/`, with 300 updates per model,
-calibration first, the same settings and resource guards. Its status/report must
-show completion before a long-run pass is assigned. The old interrupted queue
-is never resumed or relabeled as a completed 300-step run.
+## Completed indexed-reader Gemma long runs
+
+The fresh pinned queue at source revision `3ffe407` completes at
+**2026-11-18 15:58:32 CST**. Both models pass their three-step calibration and
+300-step combined-optimization training on full WikiText with the same options
+and resource guards. Raw evidence is under
+`runs/optimized_soak_20261118_gemma_indexed/gemma/`.
+
+| Model | Completed optimizer updates | Sampled peak RSS MiB | Median step seconds | Median RSS growth MiB | Late/early median step time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Gemma3 270M | 300 | 3229.19 | 4.396 | +0.60 | 1.005 |
+| Gemma3 1B-PT | 300 | 5780.56 | 7.559 | -401.26 | 1.135 |
+
+All 300 logged losses per model are finite. All 252/364 final adapter tensors
+are finite and change between checkpoint100 and checkpoint300; every B matrix
+is nonzero, and the final export equals checkpoint300 exactly. Native training
+uses the shared finite-gradient/clipping checks. The external runner does not
+export a per-step Gemma gradient CSV, so none is claimed here. Neither run raises
+the documented sustained RSS-growth or slowdown flag.
+
+Both runs demonstrate positive offload payload I/O: 270M reports
+643,434,854,400 bytes read, 1,743,481,344 bytes written, 141,300 loads and 141,303
+evictions; 1B reports 2,399,724,902,400 bytes read, 5,207,503,360 bytes written,
+203,700 loads and 203,846 evictions. These are logical tensor-payload counts;
+OS file caching means they are not measurements of physical SSD traffic.
+Temporary per-job shards are removed only after successful validation; all
+logs, resource samples, summaries and adapter snapshots remain.
+
+Pinned SHA-256:
+
+- 270M: `1e03a112eb4489da74c842126891286416140adbba169db3d2caf028cd6ecbad`
+- 1B: `0b79816f37e232aac3f9a1d2f5ddbdf338377a1480c37bb068f6cc76d64cd58e`
+
+The completion audit re-reads all four native logs (calibration/long per model),
+step counts and finite losses, every saved final adapter tensor, checkpoint100
+changes and checkpoint300 equality, payload I/O and binary hashes. It checks
+that successful temporary shard directories are gone. The original interrupted
+125-step run remains an interruption, never relabeled as a pass. Gemma's current
+CLI has no adapter-resume entrypoint; these results do not imply one was tested.
+
+All planned host short checks and the selected combined-profile long runs are
+now complete. Hosted Mac build/test and Linux dense/hybrid reference jobs for
+`3ffe407` all passed. This results-only documentation commit may trigger new CI.
+These checks do not qualify every model/configuration or every memory-switch
+subset, and they make no downstream accuracy or universal performance claim.
 
 Physical-device training remains outside these host results.
