@@ -1,5 +1,7 @@
 # Architecture and optimization integration — 2026-11-17
 
+For the subsequent combined-profile long runs and Gemma data-reader follow-up, see [the 2026-11-18 record](OPTIMIZED_SOAK_20261118.md).
+
 This follow-up records the execution-contract changes in PR #12. It separates
 implemented functionality, small-model numerical validation, real checkpoints,
 long runs and physical-device execution. The current product scope is CPU text

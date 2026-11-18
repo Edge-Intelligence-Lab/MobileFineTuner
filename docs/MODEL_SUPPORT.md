@@ -83,6 +83,7 @@ auto capability = spec.capabilities;
 ## 验证证据
 
 - [模型与优化组合验收](validation/OPTIMIZATIONS_20261117.md)
+- [组合优化长跑与数据读取修复](validation/OPTIMIZED_SOAK_20261118.md)
 - [Gemma 实权重回归](validation/GEMMA_20261117.md)
 - [Qwen 支持与 adapter 合约](QWEN_DENSE_SUPPORT.md)
 - [内存优化约束](MEMORY_OPTIMIZATIONS.md)

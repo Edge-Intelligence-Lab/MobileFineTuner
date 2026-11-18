@@ -591,6 +591,10 @@ if(BUILD_TESTS)
         )
     endif()
 
+    add_executable(test_wikitext_streaming finetune_ops/data/test_wikitext_streaming.cpp)
+    target_link_libraries(test_wikitext_streaming operators)
+    add_test(NAME WikiTextStreaming COMMAND test_wikitext_streaming)
+
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/data/test_jsonl_mask_alignment.cpp)
         add_executable(test_jsonl_mask_alignment
             finetune_ops/data/test_jsonl_mask_alignment.cpp
