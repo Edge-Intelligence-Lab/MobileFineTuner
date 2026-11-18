@@ -4,16 +4,19 @@
  */
 
 #include "safetensors_loader.h"
+#include "../../third_party/nlohmann/json.hpp"
 #include "../core/ops.h"
-#include <fstream>
-#include <sstream>
-#include <iostream>
-#include <stdexcept>
-#include <regex>
+#include "qwen_model.h"
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <regex>
 #include <set>
-#include <algorithm>
+#include <sstream>
+#include <stdexcept>
 
 namespace ops {
 
@@ -36,78 +39,60 @@ SafeTensorsReader::~SafeTensorsReader() {
 }
 
 void SafeTensorsReader::parse_header() {
-    // 1. Read header_len (first 8 bytes, little-endian uint64)
-    uint64_t header_len_raw;
+    file_.clear();
+    file_.seekg(0, std::ios::end);
+    const auto length = file_.tellg();
+    if (length < 8)
+        throw std::runtime_error("Truncated safetensors header");
+    file_.seekg(0, std::ios::beg);
+    uint64_t header_len_raw = 0;
     file_.read(reinterpret_cast<char*>(&header_len_raw), 8);
-    if (!file_) {
-        throw std::runtime_error("Failed to read header_len");
-    }
+    if (!file_ || header_len_raw > 100000000 || header_len_raw > static_cast<uint64_t>(length) - 8)
+        throw std::runtime_error("Invalid safetensors header length");
     header_len_ = static_cast<size_t>(header_len_raw);
-    
-    // 2. Read JSON header
-    std::vector<char> header_bytes(header_len_);
-    file_.read(header_bytes.data(), header_len_);
-    if (!file_) {
-        throw std::runtime_error("Failed to read JSON header");
-    }
-    
-    std::string header_json(header_bytes.begin(), header_bytes.end());
     data_offset_ = 8 + header_len_;
-    
-    // 3. Lightweight JSON parsing (manually extract tensor metadata)
-    parse_tensor_metadata(header_json);
+    std::string header(header_len_, ' ');
+    file_.read(header.data(), header.size());
+    if (!file_)
+        throw std::runtime_error("Failed to read safetensors header");
+    tensor_map_.clear();
+    parse_tensor_metadata(header);
+    const uint64_t data_bytes = static_cast<uint64_t>(length) - data_offset_;
+    for (const auto& entry : tensor_map_)
+        if (entry.second.data_offsets[1] > data_bytes)
+            throw std::runtime_error("Safetensors payload truncated: " + entry.first);
 }
 
-void SafeTensorsReader::parse_tensor_metadata(const std::string& json_str) {
-    // Lightweight regex extraction: find every "tensor_name": {...}
-    std::regex tensor_pattern(R"#("([^"]+)"\s*:\s*\{[^}]+\})#");
-    auto tensor_begin = std::sregex_iterator(json_str.begin(), json_str.end(), tensor_pattern);
-    auto tensor_end = std::sregex_iterator();
-    
-    for (auto it = tensor_begin; it != tensor_end; ++it) {
-        std::string name = (*it)[1].str();
-        std::string block = (*it)[0].str();
-        
-        // Extract dtype
-        std::regex dtype_pattern(R"#("dtype"\s*:\s*"([^"]+)")#");
-        std::smatch dtype_match;
-        std::string dtype = "F32";
-        if (std::regex_search(block, dtype_match, dtype_pattern)) {
-            dtype = dtype_match[1].str();
-        }
-        
-        // Extract shape
-        std::regex shape_pattern(R"#("shape"\s*:\s*\[([^\]]+)\])#");
-        std::smatch shape_match;
-        std::vector<int64_t> shape;
-        if (std::regex_search(block, shape_match, shape_pattern)) {
-            std::string shape_str = shape_match[1].str();
-            std::istringstream iss(shape_str);
-            std::string val;
-            while (std::getline(iss, val, ',')) {
-                // Trim whitespace
-                val.erase(std::remove_if(val.begin(), val.end(), ::isspace), val.end());
-                if (!val.empty()) {
-                    shape.push_back(std::stoll(val));
-                }
-            }
-        }
-        
-        // Extract data_offsets
-        std::regex offsets_pattern(R"#("data_offsets"\s*:\s*\[(\d+)\s*,\s*(\d+)\])#");
-        std::smatch offsets_match;
-        std::vector<size_t> offsets;
-        if (std::regex_search(block, offsets_match, offsets_pattern)) {
-            offsets.push_back(std::stoull(offsets_match[1].str()));
-            offsets.push_back(std::stoull(offsets_match[2].str()));
-        }
-        
+void SafeTensorsReader::parse_tensor_metadata(const std::string& text) {
+    const auto header = nlohmann::json::parse(text);
+    if (!header.is_object())
+        throw std::runtime_error("Safetensors header must be a JSON object");
+    for (const auto& item : header.items()) {
+        if (item.key() == "__metadata__")
+            continue;
         SafeTensorInfo info;
-        info.dtype = dtype;
-        info.shape = shape;
-        info.data_offsets = offsets;
-        
-        tensor_map_[name] = info;
+        info.dtype = item.value().at("dtype").get<std::string>();
+        const auto& shape = item.value().at("shape");
+        if (!shape.is_array())
+            throw std::runtime_error("Invalid safetensors shape");
+        for (const auto& dim : shape)
+            if (!dim.is_number_integer() || dim < 0 || dim > INT64_MAX)
+                throw std::runtime_error("Safetensors dimensions must be nonnegative integers");
+        info.shape = shape.get<std::vector<int64_t>>();
+        const auto& offsets = item.value().at("data_offsets");
+        if (!offsets.is_array() || offsets.size() != 2 || !offsets[0].is_number_unsigned() ||
+            !offsets[1].is_number_unsigned())
+            throw std::runtime_error("Invalid safetensors data offsets");
+        info.data_offsets = offsets.get<std::vector<size_t>>();
+        if (info.data_offsets[1] < info.data_offsets[0])
+            throw std::runtime_error("Reversed safetensors data offsets");
+        uint64_t numel = 1;
+        for (auto dim : info.shape) {
+            if (dim < 0 || (dim > 0 && numel > static_cast<uint64_t>(INT64_MAX) / dim))
+                throw std::runtime_error("Invalid safetensors shape");
+            numel *= dim;
+        }
+        tensor_map_.emplace(item.key(), std::move(info));
     }
 }
 
@@ -137,23 +122,6 @@ TensorPtr SafeTensorsReader::load_tensor(const std::string& name, bool transpose
 }
 
 TensorPtr SafeTensorsReader::read_tensor_data(const SafeTensorInfo& info, bool transpose, bool preserve_low_precision) {
-    auto fp16_to_fp32_inline = [](uint16_t h) -> float {
-        uint32_t sign = (h >> 15) & 0x1;
-        uint32_t exponent = (h >> 10) & 0x1F;
-        uint32_t mantissa = h & 0x3FF;
-        uint32_t f32_bits;
-        if (exponent == 0) {
-            f32_bits = (mantissa == 0) ? (sign << 31) : 0;
-        } else if (exponent == 0x1F) {
-            f32_bits = (sign << 31) | (0xFF << 23) | (mantissa << 13);
-        } else {
-            f32_bits = (sign << 31) | ((exponent + (127 - 15)) << 23) | (mantissa << 13);
-        }
-        float result;
-        std::memcpy(&result, &f32_bits, sizeof(float));
-        return result;
-    };
-
     if (info.data_offsets.size() != 2) {
         throw std::runtime_error("Invalid data_offsets");
     }
@@ -186,7 +154,8 @@ TensorPtr SafeTensorsReader::read_tensor_data(const SafeTensorInfo& info, bool t
         throw std::runtime_error("Unsupported dtype: " + info.dtype);
     }
 
-    if (byte_size != static_cast<size_t>(numel) * element_size) {
+    if (static_cast<uint64_t>(numel) > std::numeric_limits<size_t>::max() / element_size ||
+        byte_size != static_cast<size_t>(numel) * element_size) {
         throw std::runtime_error("Size mismatch for tensor");
     }
 
@@ -204,74 +173,43 @@ TensorPtr SafeTensorsReader::read_tensor_data(const SafeTensorInfo& info, bool t
     }
 
     TensorPtr tensor = std::make_shared<Tensor>(shape, target_dtype, kCPU);
-    auto transpose_buffer_float = [&](float* buffer) {
-        if (!need_transpose) return;
-        int64_t rows = info.shape[0];
-        int64_t cols = info.shape[1];
-        std::vector<float> temp(numel);
-        std::memcpy(temp.data(), buffer, numel * sizeof(float));
-        for (int64_t i = 0; i < rows; ++i) {
-            for (int64_t j = 0; j < cols; ++j) {
-                buffer[j * rows + i] = temp[i * cols + j];
-            }
+    // Convert and transpose directly from the file buffer into the final tensor.
+    // Keeping a second full FP32 transpose buffer can otherwise dominate loading
+    // peak memory for a large vocabulary projection.
+    auto copy_converted = [&](const auto* source, auto* destination, auto convert) {
+        if (!need_transpose) {
+            for (int64_t i = 0; i < numel; ++i)
+                destination[i] = convert(source[i]);
+            return;
         }
+        const int64_t rows = info.shape[0], cols = info.shape[1];
+        constexpr int64_t tile = 32;
+        for (int64_t row = 0; row < rows; row += tile)
+            for (int64_t col = 0; col < cols; col += tile)
+                for (int64_t i = row; i < std::min(row + tile, rows); ++i)
+                    for (int64_t j = col; j < std::min(col + tile, cols); ++j)
+                        destination[j * rows + i] = convert(source[i * cols + j]);
     };
-    auto transpose_buffer_u16 = [&](uint16_t* buffer) {
-        if (!need_transpose) return;
-        int64_t rows = info.shape[0];
-        int64_t cols = info.shape[1];
-        std::vector<uint16_t> temp(static_cast<size_t>(numel));
-        std::memcpy(temp.data(), buffer, static_cast<size_t>(numel) * sizeof(uint16_t));
-        for (int64_t i = 0; i < rows; ++i) {
-            for (int64_t j = 0; j < cols; ++j) {
-                buffer[j * rows + i] = temp[i * cols + j];
-            }
-        }
-    };
-    auto transpose_buffer_i32 = [&](int32_t* buffer) {
-        if (!need_transpose) return;
-        int64_t rows = info.shape[0];
-        int64_t cols = info.shape[1];
-        std::vector<int32_t> temp(static_cast<size_t>(numel));
-        std::memcpy(temp.data(), buffer, static_cast<size_t>(numel) * sizeof(int32_t));
-        for (int64_t i = 0; i < rows; ++i) {
-            for (int64_t j = 0; j < cols; ++j) {
-                buffer[j * rows + i] = temp[i * cols + j];
-            }
-        }
-    };
-
     if (info.dtype == "F32") {
-        std::memcpy(tensor->data<float>(), raw_data.data(), byte_size);
-        transpose_buffer_float(tensor->data<float>());
-    } else if (info.dtype == "F16") {
-        const uint16_t* fp16_data = reinterpret_cast<const uint16_t*>(raw_data.data());
-        if (target_dtype == kFloat16) {
-            std::memcpy(tensor->data<uint16_t>(), fp16_data, byte_size);
-            transpose_buffer_u16(tensor->data<uint16_t>());
-        } else {
-            float* fp32_data = tensor->data<float>();
-            for (int64_t i = 0; i < numel; ++i) {
-                fp32_data[i] = fp16_to_fp32_inline(fp16_data[i]);
-            }
-            transpose_buffer_float(fp32_data);
-        }
-    } else if (info.dtype == "BF16") {
-        const uint16_t* bf16_data = reinterpret_cast<const uint16_t*>(raw_data.data());
-        if (target_dtype == kBFloat16) {
-            std::memcpy(tensor->data<uint16_t>(), bf16_data, byte_size);
-            transpose_buffer_u16(tensor->data<uint16_t>());
-        } else {
-            float* fp32_data = tensor->data<float>();
-            for (int64_t i = 0; i < numel; ++i) {
-                uint32_t bits = static_cast<uint32_t>(bf16_data[i]) << 16;
-                std::memcpy(&fp32_data[i], &bits, sizeof(float));
-            }
-            transpose_buffer_float(fp32_data);
-        }
+        copy_converted(reinterpret_cast<const float*>(raw_data.data()), tensor->data<float>(),
+                       [](float value) { return value; });
     } else if (info.dtype == "I32") {
-        std::memcpy(tensor->data<int32_t>(), raw_data.data(), byte_size);
-        transpose_buffer_i32(tensor->data<int32_t>());
+        copy_converted(reinterpret_cast<const int32_t*>(raw_data.data()), tensor->data<int32_t>(),
+                       [](int32_t value) { return value; });
+    } else {
+        const auto* source = reinterpret_cast<const uint16_t*>(raw_data.data());
+        if (target_dtype == kFloat16 || target_dtype == kBFloat16) {
+            copy_converted(source, tensor->data<uint16_t>(), [](uint16_t value) { return value; });
+        } else if (info.dtype == "F16") {
+            copy_converted(source, tensor->data<float>(), fp16_bits_to_float32);
+        } else {
+            copy_converted(source, tensor->data<float>(), [](uint16_t value) {
+                const uint32_t bits = static_cast<uint32_t>(value) << 16;
+                float converted;
+                std::memcpy(&converted, &bits, sizeof(float));
+                return converted;
+            });
+        }
     }
 
     return tensor;
@@ -297,12 +235,14 @@ SafeTensorsReader::load_tensors_mapped(
         bool is_embedding = (hf_key.find("wte") != std::string::npos) ||
                             (hf_key.find("wpe") != std::string::npos) ||
                             (hf_key.find("embed_tokens") != std::string::npos);
-        bool transpose = options.transpose_linear && 
-                        (hf_key.find("weight") != std::string::npos) &&
-                        (hf_key.find("ln") == std::string::npos) &&
-                        !is_embedding &&
-                        it->second.shape.size() == 2;
-        
+        bool transpose =
+            options.transpose_linear &&
+            std::find(options.skip_transpose_keys.begin(), options.skip_transpose_keys.end(),
+                      internal_key) == options.skip_transpose_keys.end() &&
+            (hf_key.find("weight") != std::string::npos) &&
+            (hf_key.find("ln") == std::string::npos) && !is_embedding &&
+            it->second.shape.size() == 2;
+
         bool preserve_low_precision = !options.auto_promote_fp16;
         if (options.auto_promote_fp16) {
             for (const auto& needle : options.preserve_low_precision_key_substrings) {
@@ -363,13 +303,21 @@ std::vector<std::string> SafeTensorsModelReader::resolve_weight_files(const std:
         if (!f.is_open()) {
             throw std::runtime_error("Cannot open SafeTensors index: " + index.string());
         }
-        std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-        std::regex shard_pattern(R"#("([^"]+)"\s*:\s*"([^"]+\.safetensors)")#");
+        const auto index_json = nlohmann::json::parse(f);
+        const auto& weight_map = index_json.at("weight_map");
+        if (!weight_map.is_object())
+            throw std::runtime_error("SafeTensors weight_map must be an object");
         std::set<std::string> unique_names;
-        auto begin = std::sregex_iterator(json.begin(), json.end(), shard_pattern);
-        auto end = std::sregex_iterator();
-        for (auto it = begin; it != end; ++it) {
-            unique_names.insert((*it)[2].str());
+        for (const auto& item : weight_map.items()) {
+            const auto name = item.value().get<std::string>();
+            const fs::path relative(name);
+            if (relative.is_absolute() || relative.extension() != ".safetensors")
+                throw std::runtime_error("Invalid SafeTensors shard filename: " + name);
+            for (const auto& part : relative)
+                if (part == "..")
+                    throw std::runtime_error(
+                        "SafeTensors shard must stay inside the model directory");
+            unique_names.insert(name);
         }
         if (unique_names.empty()) {
             throw std::runtime_error("SafeTensors index contains no shard filenames: " + index.string());
@@ -584,6 +532,56 @@ QwenKeyMapper::generate_qwen_mapping(int num_layers) {
         m[in + "mlp.down_proj.weight"]    = hf + "mlp.down_proj.weight";
     }
     return m;
+}
+
+std::unordered_map<std::string, std::string>
+QwenKeyMapper::generate_qwen_mapping(const QwenConfig& config) {
+    config.validate();
+    if (config.hybrid()) {
+        std::unordered_map<std::string, std::string> m;
+        m["embed_tokens.weight"] = config.checkpoint_prefix + "embed_tokens.weight";
+        m["final_norm.weight"] = config.checkpoint_prefix + "norm.weight";
+        if (!config.tie_word_embeddings)
+            m["lm_head.weight"] = "lm_head.weight";
+        for (int i = 0; i < config.num_hidden_layers; ++i) {
+            const auto in = "layers." + std::to_string(i) + ".", hf = config.checkpoint_prefix + in;
+            m[in + "input_norm.weight"] = hf + "input_layernorm.weight";
+            m[in + "post_norm.weight"] = hf + "post_attention_layernorm.weight";
+            for (const auto* key : {"gate_proj", "up_proj", "down_proj"})
+                m[in + "mlp." + key + ".weight"] = hf + "mlp." + key + ".weight";
+            if (config.linear_layer(i)) {
+                for (const auto* key : {"in_proj_qkv.weight", "in_proj_z.weight",
+                                        "in_proj_a.weight", "in_proj_b.weight", "out_proj.weight",
+                                        "conv1d.weight", "A_log", "dt_bias", "norm.weight"})
+                    m[in + "linear_attn." + key] = hf + "linear_attn." + key;
+            } else {
+                for (const auto* key : {"q_proj", "k_proj", "v_proj", "o_proj", "q_norm", "k_norm"})
+                    m[in + "self_attn." + key + ".weight"] = hf + "self_attn." + key + ".weight";
+            }
+        }
+        return m;
+    }
+    auto mapping = generate_qwen_mapping(config.num_hidden_layers);
+    if (!config.attention_bias) {
+        for (auto it = mapping.begin(); it != mapping.end();) {
+            if (it->first.size() >= 5 && it->first.compare(it->first.size() - 5, 5, ".bias") == 0)
+                it = mapping.erase(it);
+            else
+                ++it;
+        }
+    }
+    if (config.uses_qk_norm())
+        for (int i = 0; i < config.num_hidden_layers; ++i)
+            for (const auto* name : {"q_norm", "k_norm"})
+                mapping["layers." + std::to_string(i) + ".self_attn." + name + ".weight"] =
+                    "model.layers." + std::to_string(i) + ".self_attn." + name + ".weight";
+    if (!config.tie_word_embeddings)
+        mapping["lm_head.weight"] = "lm_head.weight";
+    if (config.model_type == "qwen3" && config.attention_bias)
+        for (int i = 0; i < config.num_hidden_layers; ++i)
+            mapping["layers." + std::to_string(i) + ".self_attn.o_proj.bias"] =
+                "model.layers." + std::to_string(i) + ".self_attn.o_proj.bias";
+    return mapping;
 }
 
 }  // namespace ops

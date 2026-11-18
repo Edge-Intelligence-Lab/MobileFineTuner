@@ -6,6 +6,12 @@ stay in fp32.
 
 Nothing changes unless you pass `--quantize` or `--load_quantized`.
 
+The complete CLI workflow currently applies to **GPT-2 small only**, through
+`examples/gpt2_small_lora_finetune/build/train`. Shared quantization operators do
+not imply that the GPT-2 medium, Gemma, or Qwen CLIs implement this workflow.
+See [Mac regression notes](../validation/MACOS_20261114.md) for short checks on
+the current checkout; the original results below were measured on x86.
+
 - [Results](RESULTS.md) — accuracy, size, speed, memory
 - [Format](#checkpoint-format) — what a `.q8` file contains
 
@@ -47,9 +53,10 @@ versus 522.7 MiB for the original `model.safetensors`.
 ```
 
 `--pretrained_dir` is still needed for `config.json` (and the tokenizer lives
-there too), but the `.safetensors` weights are **not read**: the fp32 base
-tensors are never created, and the per-layer transpose + quantization work is
-skipped entirely.
+there too), but the `.safetensors` weights are **not read** and the per-layer
+transpose + quantization work is skipped. Model construction and memory pooling
+can still cause transient allocations; a smaller checkpoint alone does not
+guarantee lower process peak RSS on every platform.
 
 ---
 
@@ -138,7 +145,8 @@ the token after the last prompt token.
 | binary | input | output |
 |---|---|---|
 | `train` | token ids from WikiText-2, `[B, S]` int32 per step | per-step loss/PPL on stderr, LoRA adapter `.safetensors` |
-| `eval_ppl` | a `max_tokens` window of the valid split | `ppl` / `nll` and a `RESULT_JSON` line |
+| `train --eval_interval N --eval_batches K` | up to K validation batches every N training steps | `[Eval] ... valid_ppl ...` |
+| `eval_ppl` | the selected raw WikiText split | fp32 model/adapter evaluation; no Q8 CLI flags |
 | `--save_quantized` | the in-memory model after quantization | a `.q8` file (see [Checkpoint format](#checkpoint-format)) |
 
 ### Is the interface different for a quantized model?
@@ -238,8 +246,11 @@ truncated or foreign file fails with a message instead of misbehaving.
 - **`wte` is not quantized.** It is 31% of the parameters and also the `lm_head`
   projection, so it is the largest remaining opportunity (roughly 107 MiB of the
   236.8 MiB file).
-- **`eval_ppl --quantize` crashes for `seq_len >= 1024`.** Training-side
-  evaluation is unaffected.
+- **The standalone `eval_ppl` does not implement `--quantize`,
+  `--load_quantized`, or `--max_tokens`.** Such arguments are rejected. For
+  quantized validation, use `train` with `--eval_interval`, `--eval_batches`, and
+  `--eval_batch_size`; a two-batch check at `seq_len=32` is covered by the Mac
+  regression notes. Longer context evaluation needs separate validation.
 - Layers whose `in_features` is not a multiple of 32 cannot be represented and
   are left in fp32 (`skipped` in the `[Quant]` log line).
 

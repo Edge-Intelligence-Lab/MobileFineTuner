@@ -141,6 +141,10 @@ GemmaTextConfig GemmaTextConfig::from_pretrained(const std::string& model_dir) {
     GemmaTextConfig cfg;
     const std::string path = model_dir + "/config.json";
     const std::string content = read_file(path);
+    const auto model_type = extract_string(content, "model_type");
+    if (model_type != "gemma3_text")
+        throw std::invalid_argument("Gemma text graph requires model_type=gemma3_text; got " +
+                                    model_type);
 
     cfg.vocab_size = extract_int(content, "vocab_size", cfg.vocab_size);
     cfg.hidden_size = extract_int(content, "hidden_size", cfg.hidden_size);
@@ -909,6 +913,14 @@ void GemmaModel::set_activation_checkpointing(bool enabled) {
 #endif
     if(enabled && config_.attention_dropout != 0)
         throw std::invalid_argument("checkpointing requires deterministic regions (dropout=0)");
+    if (enabled)
+        for (const auto& block : blocks_)
+            for (auto* layer :
+                 {block.q_proj_lora.get(), block.k_proj_lora.get(), block.v_proj_lora.get(),
+                  block.o_proj_lora.get(), block.gate_proj_lora.get(), block.up_proj_lora.get(),
+                  block.down_proj_lora.get()})
+                if (layer && layer->dropout() > 0)
+                    throw std::invalid_argument("Gemma checkpointing requires zero LoRA dropout");
     activation_checkpointing_ = enabled;
 }
 

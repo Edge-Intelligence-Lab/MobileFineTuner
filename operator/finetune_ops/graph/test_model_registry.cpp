@@ -1,4 +1,6 @@
+#include "gemma_model.h"
 #include "model_registry.h"
+#include "qwen_model.h"
 
 #include <filesystem>
 #include <fstream>
@@ -92,12 +94,76 @@ void test_unknown_model_type() {
     require(threw, "unknown model_type did not throw");
 }
 
+void test_unsupported_qwen_architectures() {
+    for (const std::string model_type : {"qwen3_5_moe", "qwen2_moe", "qwen3_moe"}) {
+        const fs::path root = make_case_dir("unsupported_" + model_type);
+        write_file(root / "config.json", "{\"model_type\":\"" + model_type + "\"}");
+        bool registry_rejected = false;
+        bool graph_rejected = false;
+        try {
+            (void)ops::ModelRegistry::inspect_pretrained(root.string());
+        } catch (const std::exception& error) {
+            registry_rejected =
+                std::string(error.what()).find("Unsupported Qwen model_type") != std::string::npos;
+        }
+        try {
+            (void)ops::QwenConfig::from_pretrained((root / "config.json").string());
+        } catch (const std::exception& error) {
+            graph_rejected =
+                std::string(error.what()).find("Unsupported Qwen model_type") != std::string::npos;
+        }
+        require(registry_rejected, "registry dispatched an unsupported Qwen architecture");
+        require(graph_rejected, "Qwen2 graph accepted an unsupported Qwen architecture");
+    }
+}
+
+void test_capabilities_and_strict_dispatch() {
+    for (const auto& type : {"gpt2", "gemma3_text", "qwen2", "qwen3", "qwen3_5", "qwen3_5_text"}) {
+        const auto cap = ops::ModelRegistry::capabilities_for(type);
+        const bool gpt = std::string(type) == "gpt2";
+        const bool qwen = std::string(type).rfind("qwen", 0) == 0;
+        require(cap.standard_peft_adapter_io == qwen, "PEFT capability scope mismatch");
+#ifdef USE_NEW_AUTOGRAD_ENGINE
+        require(cap.causal_lm_lora && cap.streamed_attention, "Missing shared training capability");
+        require(cap.activation_checkpointing == !gpt && cap.frozen_parameter_offload == !gpt,
+                "Memory capability mismatch");
+#else
+        (void)gpt;
+        require(!cap.streamed_attention && !cap.activation_checkpointing &&
+                    !cap.frozen_parameter_offload,
+                "Legacy engine advertised unqualified memory optimizations");
+#endif
+    }
+    for (const auto& type : {"gemma2", "gemma3", "gemma4", "gpt_bigcode"}) {
+        auto root = make_case_dir(std::string("strict_") + type);
+        write_file(root / "config.json", "{\"model_type\":\"" + std::string(type) + "\"}");
+        bool rejected = false;
+        try {
+            ops::ModelRegistry::inspect_pretrained(root.string());
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        require(rejected, "Registry accepted an unimplemented architecture by name substring");
+        if (std::string(type).rfind("gemma", 0) == 0) {
+            rejected = false;
+            try {
+                ops::GemmaTextConfig::from_pretrained(root.string());
+            } catch (const std::exception&) {
+                rejected = true;
+            }
+            require(rejected, "Direct Gemma CLI parser accepted the wrong architecture");
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
+    test_capabilities_and_strict_dispatch();
     test_qwen_registry();
     test_gpt2_registry_defaults();
     test_gemma_registry_defaults_match_training_path();
     test_unknown_model_type();
+    test_unsupported_qwen_architectures();
     return 0;
 }

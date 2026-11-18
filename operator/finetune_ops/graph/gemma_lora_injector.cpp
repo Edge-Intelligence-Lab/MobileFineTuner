@@ -77,10 +77,11 @@ std::string join_csv(const std::vector<std::string>& items) {
     return oss.str();
 }
 
-std::pair<TensorPtr, TensorPtr> create_lora_params(int64_t in_dim, int64_t out_dim, int rank) {
+std::pair<TensorPtr, TensorPtr> create_lora_params(int64_t in_dim, int64_t out_dim, int rank,
+                                                   std::mt19937& rng) {
     // Follow PEFT default init: lora_A uses kaiming_uniform_(a=sqrt(5)), lora_B is all zeros.
     // PyTorch computes bound = sqrt(3) * gain / sqrt(fan_in), gain = sqrt(2/(1+a^2)), a=sqrt(5) -> bound = 1/sqrt(fan_in)
-    static std::mt19937 rng(42);
+
     float bound = 1.0f / std::sqrt(static_cast<float>(in_dim));
     std::uniform_real_distribution<float> dist(-bound, bound);
 
@@ -98,6 +99,12 @@ std::pair<TensorPtr, TensorPtr> create_lora_params(int64_t in_dim, int64_t out_d
 }  // namespace
 
 void GemmaLoraInjector::inject(GemmaModel& model, const GemmaLoraSpec& spec) {
+    if (spec.rank <= 0 || !std::isfinite(spec.alpha) || spec.alpha <= 0 ||
+        !std::isfinite(spec.dropout) || spec.dropout < 0 || spec.dropout >= 1)
+        throw std::invalid_argument("Invalid Gemma LoRA rank, alpha or dropout");
+    if (model.activation_checkpointing_enabled() && spec.dropout > 0)
+        throw std::invalid_argument("Gemma checkpointing requires zero LoRA dropout");
+    std::mt19937 rng(static_cast<uint32_t>(spec.seed));
     model_ = &model;
     spec_ = spec;
     num_layers_ = model.config().num_hidden_layers;
@@ -147,8 +154,10 @@ void GemmaLoraInjector::inject(GemmaModel& model, const GemmaLoraSpec& spec) {
                 else if (dim1 == hidden) { out_dim = dim1; in_dim = dim0; }
             }
 
-            auto [A, B] = create_lora_params(in_dim, out_dim, spec.rank);
+            auto [A, B] = create_lora_params(in_dim, out_dim, spec.rank, rng);
             ref.linear->attach_lora(A, B, scale, 0, out_dim);
+            ref.linear->set_dropout(spec.dropout,
+                                    spec.seed + uint64_t(layer) * 7 + attached_modules_);
             ref.linear->set_debug_name("layers_" + std::to_string(layer) + "_self_attn_" + module);
             attached_modules_++;
         }
@@ -272,6 +281,10 @@ void GemmaLoraInjector::load_lora_safetensors(const std::string& path) {
     num_layers_ = model_->config().num_hidden_layers;
 
     LoRAState state = LoraSaver::load_safetensors(path);
+    if (!std::isfinite(state.dropout) || state.dropout < 0 || state.dropout >= 1)
+        throw std::invalid_argument("Invalid saved Gemma LoRA dropout");
+    if (model_->activation_checkpointing_enabled() && state.dropout > 0)
+        throw std::invalid_argument("Gemma checkpointing requires zero LoRA dropout");
     struct LoadedSlice {
         int layer = -1;
         std::string target;
@@ -348,6 +361,8 @@ void GemmaLoraInjector::load_lora_safetensors(const std::string& path) {
 
         int out_cols = static_cast<int>(weight_shape[1]);
         ref.linear->attach_lora(slice.A, slice.B, scale, 0, out_cols);
+        ref.linear->set_dropout(state.dropout,
+                                spec_.seed + uint64_t(slice.layer) * 7 + attached_modules_);
         ref.linear->set_debug_name("layers_" + std::to_string(slice.layer) + "_" + module_name);
         attached_modules_++;
 

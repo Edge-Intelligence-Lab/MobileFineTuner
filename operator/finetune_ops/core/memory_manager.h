@@ -13,6 +13,8 @@
 #include <memory>
 #include <mutex>
 #include <cstddef>
+#include <cstdlib>
+#include <string>
 #include <algorithm>
 
 namespace ops {

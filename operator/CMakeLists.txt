@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.10)
 project(Operators VERSION 2.0.0 LANGUAGES CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+install(FILES third_party/nlohmann/LICENSE.MIT
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/MobileFineTuner/nlohmann-json)
 
 # ============================================================================
 # Industrial-grade configuration options
@@ -102,6 +104,7 @@ set(FINETUNE_SOURCES
     finetune_ops/core/autograd_engine.cpp
     finetune_ops/core/backward_functions.cpp
     finetune_ops/core/quant_io.cpp
+    finetune_ops/core/qwen35_ops.cpp
     finetune_ops/core/logger.cpp
     finetune_ops/core/memory_manager.cpp
     finetune_ops/core/step_arena.cpp
@@ -125,6 +128,7 @@ set(FINETUNE_SOURCES
     finetune_ops/graph/auto_model.cpp
     # Qwen model and MMLU dataset
     finetune_ops/graph/qwen_model.cpp
+    finetune_ops/graph/qwen_adapter.cpp
     finetune_ops/data/mmlu_dataset.cpp
     
     # Stage B: data loading and training
@@ -171,6 +175,11 @@ if(USE_BLAS)
         find_library(ACCELERATE_LIBRARY Accelerate)
         if(ACCELERATE_LIBRARY)
             target_link_libraries(operators PUBLIC ${ACCELERATE_LIBRARY})
+            # Use Apple's updated LP64 CBLAS declarations on modern macOS.
+            # Explicit deployment targets below 13.3 retain the legacy ABI.
+            if(NOT CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VERSION_GREATER_EQUAL "13.3")
+                target_compile_definitions(operators PRIVATE ACCELERATE_NEW_LAPACK)
+            endif()
             add_definitions(-DUSE_BLAS)
             message(STATUS "✅ Linked Accelerate Framework: ${ACCELERATE_LIBRARY}")
         else()
@@ -328,6 +337,29 @@ if(BUILD_TESTS)
     add_executable(test_power_monitor finetune_ops/energy/test_power_monitor.cpp)
     target_link_libraries(test_power_monitor PRIVATE operators)
     add_test(NAME PowerMonitor COMMAND test_power_monitor)
+
+    if(USE_NEW_AUTOGRAD_ENGINE)
+        add_executable(test_gemma_trainer finetune_ops/optim/test_gemma_trainer.cpp)
+        target_link_libraries(test_gemma_trainer operators)
+        add_test(NAME GemmaTrainer COMMAND test_gemma_trainer)
+        add_executable(test_qwen_architecture finetune_ops/graph/test_qwen_architecture.cpp)
+        target_link_libraries(test_qwen_architecture operators)
+        add_test(NAME QwenArchitecture COMMAND test_qwen_architecture)
+        add_executable(test_qwen35_ops finetune_ops/core/test_qwen35_ops.cpp)
+        target_link_libraries(test_qwen35_ops operators)
+        add_test(NAME Qwen35OpsGradients COMMAND test_qwen35_ops)
+        add_executable(test_qwen_hf_parity finetune_ops/graph/test_qwen_hf_parity.cpp)
+        target_link_libraries(test_qwen_hf_parity operators)
+        add_test(NAME QwenHFParity COMMAND test_qwen_hf_parity)
+        set_tests_properties(QwenHFParity PROPERTIES SKIP_RETURN_CODE 77)
+
+    endif()
+    add_executable(test_optimizer_grad_norm finetune_ops/optim/test_optimizer_grad_norm.cpp)
+    target_link_libraries(test_optimizer_grad_norm operators)
+    add_test(NAME OptimizerGradNorm COMMAND test_optimizer_grad_norm)
+    add_executable(test_lm_loss_large_vocab finetune_ops/core/test_lm_loss_large_vocab.cpp)
+    target_link_libraries(test_lm_loss_large_vocab operators)
+    add_test(NAME LMLossLargeVocabulary COMMAND test_lm_loss_large_vocab)
 
     add_executable(test_tensor_iteration finetune_ops/optim/test_tensor_iteration.cpp)
     target_link_libraries(test_tensor_iteration PRIVATE operators)
@@ -558,6 +590,10 @@ if(BUILD_TESTS)
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..
         )
     endif()
+
+    add_executable(test_wikitext_streaming finetune_ops/data/test_wikitext_streaming.cpp)
+    target_link_libraries(test_wikitext_streaming operators)
+    add_test(NAME WikiTextStreaming COMMAND test_wikitext_streaming)
 
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/finetune_ops/data/test_jsonl_mask_alignment.cpp)
         add_executable(test_jsonl_mask_alignment

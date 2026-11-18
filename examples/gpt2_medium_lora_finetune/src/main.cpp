@@ -500,20 +500,15 @@ int main(int argc, char** argv) {
         };
 
         auto evaluate_valid = [&]() -> float {
-            struct NoGradGuard {
-                NoGradGuard() { ops::autograd::Engine::instance().set_enabled(false); }
-                ~NoGradGuard() {
-                    ops::autograd::Engine::instance().clear_graph();
-                    ops::autograd::Engine::instance().set_enabled(true);
-                }
-            } _nograd_guard;
+            ops::autograd::GradModeGuard no_grad(false);
             valid_dataset.reset_cursor();
             double loss_sum = 0.0;
             int64_t token_sum = 0;
             int processed = 0;
             while (processed < args.eval_batches) {
                 auto batch = valid_dataset.next_batch(args.eval_batch_size, false);
-                if (!batch.input_ids) break;
+                if (!batch.input_ids)
+                    break;
                 auto logits = model.forward(batch.input_ids, batch.attention_mask);
                 auto loss = lm_cross_entropy(logits, batch.labels, -100, "mean");
                 float loss_val = loss->data<float>()[0];
@@ -522,7 +517,8 @@ int main(int argc, char** argv) {
                 token_sum += tokens;
                 processed++;
             }
-            if (token_sum == 0) return 1e9f;
+            if (token_sum == 0)
+                return 1e9f;
             float mean_loss = float(loss_sum / double(token_sum));
             return perplexity_from_loss(mean_loss);
         };

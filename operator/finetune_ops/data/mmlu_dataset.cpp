@@ -229,29 +229,12 @@ void MMLUDataset::encode_sample(const MMLUSample& sample,
     
     input_ids = full_ids;
     
-    // Create labels: only answer tokens keep labels, others set to -100
-    // Causal LM: labels[i] = input_ids[i+1], but we only compute loss on answer positions
+    // Labels stay aligned with input IDs. lm_cross_entropy applies the causal
+    // shift once, so the last prompt logit predicts the first answer token.
     labels.resize(input_ids.size(), -100);
-    
-    // Locate answer tokens
-    // Answers follow the prompt, typically like " A" or " B"
-    // full_ids is prompt_ids plus answer tokens
-    
-    size_t prompt_len = prompt_ids.size();
-    
-    // For causal LM we predict input_ids[i+1], so:
-    // labels[prompt_len - 1] = answer_token_id (predict the answer)
-    // In practice answer tokens are at full_ids[prompt_len] or later.
-    //
-    // Simplified: place answer tokens on labels starting at the last prompt position
-    if (prompt_len > 0 && prompt_len <= input_ids.size()) {
-        // Locate answer tokens (in full_ids starting at prompt_len)
-        for (size_t i = prompt_len; i < full_ids.size(); ++i) {
-            // Set label: position i-1 predicts token at position i
-            if (i - 1 < labels.size()) {
-                labels[i - 1] = full_ids[i];
-            }
-        }
+    const size_t prompt_len = prompt_ids.size();
+    for (size_t i = prompt_len; i < full_ids.size(); ++i) {
+        labels[i] = full_ids[i];
     }
 }
 

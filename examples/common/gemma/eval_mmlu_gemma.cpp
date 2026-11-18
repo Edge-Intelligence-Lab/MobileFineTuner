@@ -1,11 +1,12 @@
-#include <iostream>
-#include <fstream>
-#include <string>
-#include <vector>
-#include <unordered_map>
+#include "finetune_ops/core/autograd_engine.h"
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "finetune_ops/graph/gemma_model.h"
 #include "finetune_ops/graph/safetensors_loader.h"
@@ -151,6 +152,7 @@ static string build_prompt(const MCQItem& q, const vector<MCQItem>* shots) {
 }
 
 int main(int argc, char** argv) {
+    ops::autograd::GradModeGuard no_grad(false);
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
 

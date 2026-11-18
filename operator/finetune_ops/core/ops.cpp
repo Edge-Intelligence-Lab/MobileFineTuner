@@ -59,45 +59,45 @@ namespace {
 
 namespace {
 
-    void matmul_fallback_nn(const float* A, const float* B, float* C,
-                            int64_t M, int64_t N, int64_t K) {
-        std::fill(C, C + M * N, 0.0f);
-        constexpr int64_t N_BLOCK = 64;
-        constexpr int64_t K_BLOCK = 64;
+[[maybe_unused]] void matmul_fallback_nn(const float* A, const float* B, float* C, int64_t M,
+                                         int64_t N, int64_t K) {
+    std::fill(C, C + M * N, 0.0f);
+    constexpr int64_t N_BLOCK = 64;
+    constexpr int64_t K_BLOCK = 64;
 
-        for (int64_t kk = 0; kk < K; kk += K_BLOCK) {
-            const int64_t kend = std::min(kk + K_BLOCK, K);
-            for (int64_t jj = 0; jj < N; jj += N_BLOCK) {
-                const int64_t jend = std::min(jj + N_BLOCK, N);
-                for (int64_t i = 0; i < M; ++i) {
-                    float* c_row = C + i * N;
-                    const float* a_row = A + i * K;
-                    for (int64_t k = kk; k < kend; ++k) {
-                        const float a = a_row[k];
-                        const float* b_row = B + k * N;
-                        for (int64_t j = jj; j < jend; ++j) {
-                            c_row[j] += a * b_row[j];
-                        }
+    for (int64_t kk = 0; kk < K; kk += K_BLOCK) {
+        const int64_t kend = std::min(kk + K_BLOCK, K);
+        for (int64_t jj = 0; jj < N; jj += N_BLOCK) {
+            const int64_t jend = std::min(jj + N_BLOCK, N);
+            for (int64_t i = 0; i < M; ++i) {
+                float* c_row = C + i * N;
+                const float* a_row = A + i * K;
+                for (int64_t k = kk; k < kend; ++k) {
+                    const float a = a_row[k];
+                    const float* b_row = B + k * N;
+                    for (int64_t j = jj; j < jend; ++j) {
+                        c_row[j] += a * b_row[j];
                     }
                 }
             }
         }
     }
+}
 
-    void matmul_fallback_nt(const float* A, const float* B, float* C,
-                            int64_t M, int64_t N, int64_t K) {
-        for (int64_t i = 0; i < M; ++i) {
-            const float* a_row = A + i * K;
-            for (int64_t j = 0; j < N; ++j) {
-                const float* b_row = B + j * K;
-                float sum = 0.0f;
-                for (int64_t k = 0; k < K; ++k) {
-                    sum += a_row[k] * b_row[k];
-                }
-                C[i * N + j] = sum;
+[[maybe_unused]] void matmul_fallback_nt(const float* A, const float* B, float* C, int64_t M,
+                                         int64_t N, int64_t K) {
+    for (int64_t i = 0; i < M; ++i) {
+        const float* a_row = A + i * K;
+        for (int64_t j = 0; j < N; ++j) {
+            const float* b_row = B + j * K;
+            float sum = 0.0f;
+            for (int64_t k = 0; k < K; ++k) {
+                sum += a_row[k] * b_row[k];
             }
+            C[i * N + j] = sum;
         }
     }
+}
 
     inline uint16_t float32_to_fp16(float value) {
         uint32_t bits;

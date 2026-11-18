@@ -1,0 +1,23 @@
+flowchart LR
+    consumers["C++ 应用 / Android SDK · JNI"] --> api["统一 C++ 接口<br/>AutoModelForCausalLM · AutoTrainer"]
+    assets["模型文件 + 训练文本<br/>config · SafeTensors · tokenizer"] --> loading["配置识别与资源加载<br/>ModelRegistry · 权重校验 · Tokenizer"]
+    api --> loading
+    loading --> models["按实际架构组织模型图"]
+    cli["模型专用 CLI 示例<br/>直接调用对应模型与训练循环"] --> models
+    models --> gpt["GPT2Model<br/>GPT-2 Small / Medium"]
+    models --> gemma["GemmaModel<br/>Gemma 3 · 270M / 1B"]
+    models --> qwen["QwenModel · 配置驱动<br/>Qwen2 / Qwen3 / Qwen3.5 文本"]
+    gpt --> shared["共享 C++ 训练底座<br/>Tensor · 算子 · Autograd<br/>LoRALinear · 交叉熵 · Adam"]
+    gemma --> shared
+    qwen --> shared
+    shared --> host["执行后端<br/>CPU · 可选 BLAS<br/>Mac / Android arm64"]
+    shared --> adapter["训练产物<br/>LoRA adapter · 日志与指标"]
+    options["按模型启用的功能<br/>流式注意力 / 量化 / 重算 / 参数卸载<br/>功耗监测与调度"] -. "支持范围因路径而异" .-> shared
+    classDef entry fill:#e8f5ef,stroke:#44866b,color:#183a2a;
+    classDef model fill:#edf2fc,stroke:#6683b4,color:#1d365b;
+    classDef runtime fill:#f1edf9,stroke:#8772ac,color:#3a2b52;
+    classDef note fill:#faf8ed,stroke:#aa995e,color:#514722;
+    class consumers,api,assets,loading,cli entry;
+    class models,gpt,gemma,qwen model;
+    class shared,host,adapter runtime;
+    class options note;

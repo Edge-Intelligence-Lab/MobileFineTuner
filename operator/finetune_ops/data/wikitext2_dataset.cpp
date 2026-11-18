@@ -210,6 +210,7 @@ void WikiText2Dataset::load(Split split) {
     cursor_ = 0;
     ids_global_offset_ = 0;
     total_tokens_ = 0;
+    line_offsets_.clear();
     pretokenized_mode_ = !cfg_.pretokenized_path.empty();
     jsonl_mode_ = (!cfg_.jsonl_train.empty() || !cfg_.jsonl_valid.empty() || !cfg_.jsonl_test.empty());
 
@@ -651,21 +652,26 @@ void WikiText2Dataset::precompute_chunk_offsets() {
     
     size_t token_count = 0;
     std::string line;
-    
+
     // Tokenize line by line, accumulate token counts only (do not store tokens)
-    while (std::getline(file, line)) {
-        if (!cfg_.insert_eos_between_lines && trim(line).empty()) continue;
-        
+    while (true) {
+        const auto file_offset = file.tellg();
+        if (!std::getline(file, line))
+            break;
+        if (!cfg_.insert_eos_between_lines && trim(line).empty())
+            continue;
+
+        line_offsets_.push_back({static_cast<std::streamoff>(file_offset), token_count});
         auto enc = encode_fn_(line);
         token_count += enc.size();
-        
+
         if (cfg_.insert_eos_between_lines) {
-            token_count += 1;  // EOS
+            token_count += 1; // EOS
         }
-        
+
         // enc is released when leaving scope
     }
-    
+
     // Ensure EOS at the end
     token_count += 1;
     float frac = std::clamp(cfg_.data_fraction, 0.0f, 1.0f);
@@ -709,19 +715,35 @@ void WikiText2Dataset::load_window_from_file(size_t global_token_start, size_t n
     
     // Tokenize line by line, skipping unused parts
     std::vector<int32_t> window_tokens;
-    window_tokens.reserve(needed_tokens + 1000);  // leave headroom
-    
+    window_tokens.reserve(needed_tokens + 1000); // leave headroom
+
     size_t current_offset = 0;
+    // The prescan already knows each line's byte and token offsets. Seek to
+    // the containing line instead of re-tokenizing the complete file prefix
+    // on every shuffled cache miss. Keep the established token/EOS framing.
+    if (!line_offsets_.empty()) {
+        auto next = std::upper_bound(
+            line_offsets_.begin(), line_offsets_.end(), global_token_start,
+            [](size_t token, const LineOffset &entry) { return token < entry.token_offset; });
+        if (next != line_offsets_.begin()) {
+            const auto &entry = *std::prev(next);
+            file.seekg(entry.file_offset);
+            if (!file)
+                throw std::runtime_error("Cannot seek WT2 token window: " + current_file_path_);
+            current_offset = entry.token_offset;
+        }
+    }
     std::string line;
-    
+
     while (std::getline(file, line)) {
-        if (!cfg_.insert_eos_between_lines && trim(line).empty()) continue;
-        
+        if (!cfg_.insert_eos_between_lines && trim(line).empty())
+            continue;
+
         auto enc = encode_fn_(line);
         if (cfg_.insert_eos_between_lines) {
             enc.push_back(cfg_.eos_id);
         }
-        
+
         // Check if this line overlaps the requested window
         size_t line_end = current_offset + enc.size();
         
@@ -747,7 +769,7 @@ void WikiText2Dataset::load_window_from_file(size_t global_token_start, size_t n
         // Skip ahead until the window is reached
         if (current_offset < global_token_start) continue;
     }
-    
+
     // Shrink temporary window capacity before moving it
     window_tokens.shrink_to_fit();
     // Update cache

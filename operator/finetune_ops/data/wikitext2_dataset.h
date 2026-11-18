@@ -8,6 +8,7 @@
 #include "../core/tensor.h"
 #include "../core/tokenizer_bpe.h"
 #include <functional>
+#include <ios>
 #include <string>
 #include <vector>
 #include <random>
@@ -150,6 +151,12 @@ private:
     std::vector<int32_t> ids_;        // token cache for current window (~1e5)
     size_t ids_global_offset_ = 0;    // global token index for ids_[0]
     size_t total_tokens_ = 0;         // total tokens (pre-scan)
+    struct LineOffset {
+        std::streamoff file_offset;
+        size_t token_offset;
+    };
+    // Small seek index; tokens remain bounded by max_cache_tokens.
+    std::vector<LineOffset> line_offsets_;
     
     // Chunk start offsets (global token indices)
     std::vector<size_t> starts_;      // length M = num_sequences()

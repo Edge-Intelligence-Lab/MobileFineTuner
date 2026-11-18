@@ -3,6 +3,7 @@
 #include "../core/memory_manager.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
@@ -20,6 +21,7 @@ LoraSpec make_gpt2_lora_spec(const AutoLoraConfig& cfg) {
     spec.rank = cfg.rank;
     spec.alpha = cfg.alpha;
     spec.dropout = cfg.dropout;
+    spec.seed = cfg.seed;
     spec.split_qkv = true;
 
     const auto& modules = cfg.target_modules;
@@ -58,21 +60,11 @@ GemmaLoraSpec make_gemma_lora_spec(const AutoLoraConfig& cfg) {
     spec.rank = cfg.rank;
     spec.alpha = cfg.alpha;
     spec.dropout = cfg.dropout;
+    spec.seed = cfg.seed;
     if (!cfg.target_modules.empty()) {
         spec.target_modules = cfg.target_modules;
     }
     return spec;
-}
-
-bool qwen_qv_only(const AutoLoraConfig& cfg) {
-    if (cfg.target_modules.empty()) {
-        return false;
-    }
-    std::unordered_set<std::string> requested(cfg.target_modules.begin(), cfg.target_modules.end());
-    return requested.count("q_proj") > 0 &&
-           requested.count("v_proj") > 0 &&
-           requested.count("k_proj") == 0 &&
-           requested.count("o_proj") == 0;
 }
 
 SafeTensorsLoadOptions family_load_options(ModelFamily family,
@@ -125,7 +117,9 @@ AutoModelForCausalLM::from_pretrained(const std::string& model_dir,
         }
         case ModelFamily::Qwen: {
             QwenConfig cfg = QwenConfig::from_pretrained(model_dir + "/config.json");
-            model->qwen_ = std::make_unique<QwenModel>(cfg);
+            model->qwen_ = std::make_unique<QwenModel>(
+                cfg, options.load_weights ? QwenModel::WeightInitialization::Deferred
+                                          : QwenModel::WeightInitialization::Allocate);
             break;
         }
         default:
@@ -163,11 +157,7 @@ void AutoModelForCausalLM::load_pretrained_weights(const AutoModelLoadOptions& o
             break;
         }
         case ModelFamily::Qwen: {
-            auto mapping = QwenKeyMapper::generate_qwen_mapping(qwen_->config().num_hidden_layers);
-            auto tensors = reader.load_tensors_mapped(mapping, load_opts);
-            for (const auto& kv : tensors) {
-                qwen_->assign_weight(kv.first, kv.second);
-            }
+            qwen_->load_pretrained(model_dir_, load_opts);
             MemoryManager::instance().clear_unused_memory();
             break;
         }
@@ -191,6 +181,13 @@ TensorPtr AutoModelForCausalLM::forward(const TensorPtr& input_ids,
 }
 
 void AutoModelForCausalLM::init_lora(const AutoLoraConfig& config) {
+    if (!spec_.capabilities.causal_lm_lora)
+        throw std::logic_error("LoRA training is unavailable for this model and engine build");
+    if (config.rank <= 0 || !std::isfinite(config.alpha) || config.alpha <= 0 ||
+        !std::isfinite(config.dropout) || config.dropout < 0 || config.dropout >= 1)
+        throw std::invalid_argument("LoRA requires positive rank/alpha and dropout in [0,1)");
+    if (!trainable_parameters().empty())
+        throw std::logic_error("LoRA is already initialized");
     switch (spec_.family) {
         case ModelFamily::GPT2: {
             gpt2_->init_lora_modules();
@@ -204,8 +201,8 @@ void AutoModelForCausalLM::init_lora(const AutoLoraConfig& config) {
             break;
         }
         case ModelFamily::Qwen:
-            qwen_->init_lora(config.rank, config.alpha, config.dropout,
-                             qwen_qv_only(config), config.seed);
+            qwen_->init_lora(config.rank, config.alpha, config.dropout, config.target_modules,
+                             config.seed);
             qwen_->freeze_base();
             break;
         default:

@@ -9,6 +9,7 @@
 #include "../core/tensor.h"
 #include <cstdint>
 #include <memory>
+#include <random>
 #include <vector>
 
 namespace ops {
@@ -69,7 +70,10 @@ public:
      * @brief Clear all LoRA slices (remove slices only, keep base)
      */
     void clear_lora();
-    
+    void set_dropout(float probability, uint64_t seed = 42);
+    float dropout() const { return dropout_; }
+    void set_training(bool training) { training_ = training; }
+
     /**
      * @brief Export/infer: bake ΔW into base (apply over submatrix range)
      */
@@ -137,6 +141,9 @@ private:
     bool merged_;
     std::vector<uint8_t> merge_backup_;
     std::string debug_name_;
+    float dropout_ = 0.0f;
+    bool training_ = true;
+    mutable std::mt19937 dropout_rng_{42};
     // === 新增：Q8_0 量化相关成员 ===
     std::vector<block_q8_0> quantized_weight_;   // 量化后的 block 数组
     int64_t quantized_numel_ = 0;                // 原始元素个数（用于反量化）

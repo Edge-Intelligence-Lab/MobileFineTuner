@@ -40,7 +40,9 @@ struct LoraSpec {
     };
     
     std::vector<int> layers;  // empty = all layers
-    
+
+    uint64_t seed = 42;
+
     LoraSpec() = default;
     
     // Default config (attention-only)

@@ -1,5 +1,7 @@
 # Memory feature validation scope
 
+Historical validation snapshot; subsequent architecture/optimization changes and current qualification limits are recorded in [the follow-up validation](validation/OPTIMIZATIONS_20261117.md).
+
 This is a code-integration check, not a paper benchmark, accuracy result, or
 claim of bitwise equivalence. Features remain opt-in and disabled by default.
 

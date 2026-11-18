@@ -53,6 +53,9 @@ BASE_CASES = [
 ]
 
 QWEN_CASES = [
+    ("qwen_thinking", "<think>Let me check 123456.</think>\nAnswer: 42."),
+    ("qwen_whitespace", "  I'm\tchecking\r\n\nthese 00123 tokens.  "),
+    ("qwen_unicode_symbols", "你好，世界！ café 😊 — test １２３"),
     (
         "qwen_chat_tokens",
         "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n",

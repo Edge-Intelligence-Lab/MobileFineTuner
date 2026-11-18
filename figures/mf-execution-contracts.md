@@ -1,0 +1,26 @@
+# MF 执行合约与职责边界
+
+模型图声明结构，共享运行时执行计算与训练。Qwen 的权重清单统一驱动加载、LoRA 与内存策略；GPT-2、Gemma 使用各自模型图。
+
+```mermaid
+flowchart TB
+    entry["调用层<br/>C++ API / CLI<br/>Android JNI"] --> registry["发现与能力声明<br/>ModelRegistry<br/>配置类型<br/>构建能力"]
+    registry --> model_graph["Qwen 模型图<br/>Qwen2 / Qwen3<br/>Qwen3.5"]
+    registry --> other["GPT2 / Gemma<br/>模型图"]
+    other --> core
+    model_graph --> inventory["模块与权重清单<br/>稳定结构身份<br/>独立驻留状态"]
+    inventory --> load["严格加载<br/>形状声明<br/>完整校验<br/>安装权重"]
+    inventory --> lora["LoRA 与 adapter<br/>目标 / 维度 / 命名"]
+    inventory --> memory["内存策略<br/>重算捕获<br/>权重分组<br/>驻留生命周期"]
+    load --> core["共享计算内核<br/>Tensor / Autograd<br/>LoRALinear<br/>Loss / Adam"]
+    lora --> core
+    memory --> core
+    core --> policy["训练与评估约束<br/>有限值检查<br/>精确裁剪<br/>梯度累积<br/>评估状态"]
+    policy --> outputs["可审计产物<br/>adapter / 指标<br/>测试结果"]
+    classDef surface fill:#e8f5ef,stroke:#44866b,color:#183a2a;
+    classDef model fill:#edf2fc,stroke:#6683b4,color:#1d365b;
+    classDef runtime fill:#f1edf9,stroke:#8772ac,color:#3a2b52;
+    class entry,registry,outputs surface;
+    class model_graph,other,inventory,load,lora,memory model;
+    class core,policy runtime;
+```
