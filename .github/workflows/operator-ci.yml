@@ -8,6 +8,7 @@ on:
       - "examples/**"
       - "scripts/run_training_smoke.sh"
       - "scripts/generate_qwen_hf_fixtures.py"
+      - "scripts/compare_qwen_profile_snapshots.py"
       - "scripts/requirements-qwen*-validation.txt"
       - "scripts/test_qwen_training_cli.py"
       - "scripts/run_qwen_mac_stability.py"
@@ -29,6 +30,7 @@ on:
       - "examples/**"
       - "scripts/run_training_smoke.sh"
       - "scripts/generate_qwen_hf_fixtures.py"
+      - "scripts/compare_qwen_profile_snapshots.py"
       - "scripts/requirements-qwen*-validation.txt"
       - "scripts/test_qwen_training_cli.py"
       - "scripts/run_qwen_mac_stability.py"
@@ -233,7 +235,20 @@ jobs:
         env:
           MFT_QWEN_HF_FIXTURES: ${{ github.workspace }}/runs/qwen_hf_fixtures
           MFT_QWEN_MEMORY_MATRIX: '1'
+          MFT_QWEN_PARITY_SNAPSHOT_DIR: ${{ github.workspace }}/runs/qwen_profile_snapshots
         run: ctest --test-dir operator/build --output-on-failure
+      - name: Compare profiles at byte-identical parameter and input points
+        run: |
+          python - <<'PYCODE'
+          from pathlib import Path
+          import subprocess
+          import sys
+          roots = sorted(Path("runs/qwen_profile_snapshots").iterdir())
+          assert roots, "No fixed-point snapshots were produced"
+          for root in roots:
+              subprocess.run([sys.executable, "scripts/compare_qwen_profile_snapshots.py",
+                              "--root", str(root), "--output", str(root / "comparison.json")], check=True)
+          PYCODE
       - name: Load native adapters with PEFT
         env:
           PYTHONDONTWRITEBYTECODE: '1'

@@ -85,6 +85,7 @@ auto capability = spec.capabilities;
 - [模型与优化组合验收](validation/OPTIMIZATIONS_20261117.md)
 - [组合优化长跑与数据读取修复](validation/OPTIMIZED_SOAK_20261118.md)
 - [初次 Android 真机验证及严格数值诊断边界](validation/ANDROID_20261118.md)
+- [真机固定参数检查与已启动的多模型长跑队列](validation/ANDROID_EXTENDED_20261118.md)
 - [Gemma 实权重回归](validation/GEMMA_20261117.md)
 - [Qwen 支持与 adapter 合约](QWEN_DENSE_SUPPORT.md)
 - [内存优化约束](MEMORY_OPTIMIZATIONS.md)

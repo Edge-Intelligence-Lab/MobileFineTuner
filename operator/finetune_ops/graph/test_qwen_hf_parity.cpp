@@ -34,6 +34,55 @@ double compare(const TensorPtr& got, const TensorPtr& expected, const std::strin
     return maximum;
 }
 
+// Optional diagnostics at a fixed parameter point, before the optimizer update.
+// Default CI behavior and tolerances are unchanged. A unique output directory
+// prevents old snapshots from being mistaken for current results.
+void snapshot_profile(const fs::path& path, bool streaming, int memory_profile, QwenModel& model,
+                      const TensorPtr& logits, const TensorPtr& loss, const TensorPtr& ids,
+                      const TensorPtr& mask, const TensorPtr& labels) {
+    const auto* root = std::getenv("MFT_QWEN_PARITY_SNAPSHOT_DIR");
+    if (!root)
+        return;
+    const auto directory =
+        fs::path(root) / path.filename() /
+        ("memory" + std::to_string(memory_profile) + "_stream" + std::to_string(streaming));
+    fs::create_directories(directory);
+    check(!fs::exists(directory / "snapshot.json"), "Refusing to overwrite profile snapshot");
+    std::ofstream data(directory / "values.bin", std::ios::binary);
+    check(bool(data), "Cannot create profile data");
+    nlohmann::json metadata;
+    metadata["schema"] = "mobilefinetuner.fixed_point.v1";
+    metadata["memory_profile"] = memory_profile;
+    metadata["streaming"] = streaming;
+    size_t offset = 0;
+    auto save = [&](const std::string& name, const TensorPtr& tensor) {
+        check(tensor && (tensor->dtype() == kFloat32 || tensor->dtype() == kInt32),
+              "Unsupported diagnostic tensor");
+        const auto bytes = static_cast<size_t>(tensor->numel()) * 4;
+        metadata["tensors"][name] = {{"shape", tensor->shape()},
+                                     {"offset", offset},
+                                     {"bytes", bytes},
+                                     {"dtype", tensor->dtype() == kFloat32 ? "F32" : "I32"}};
+        data.write(static_cast<const char*>(tensor->data_ptr()), bytes);
+        check(bool(data), "Cannot write profile tensor");
+        offset += bytes;
+    };
+    save("logits", logits);
+    save("loss", loss);
+    save("input_ids", ids);
+    save("attention_mask", mask);
+    save("labels", labels);
+    for (const auto& item : model.named_lora_parameters()) {
+        save("parameter." + item.first, item.second);
+        save("gradient." + item.first, item.second->grad());
+    }
+    data.close();
+    check(bool(data), "Cannot finish profile data");
+    std::ofstream info(directory / "snapshot.json");
+    info << metadata.dump(2) << '\n';
+    check(bool(info), "Cannot finish profile metadata");
+}
+
 void run(const fs::path& path, bool streaming, int memory_profile = 0) {
     auto& engine = autograd::Engine::instance();
     engine.clear_graph();
@@ -115,6 +164,8 @@ void run(const fs::path& path, bool streaming, int memory_profile = 0) {
                 grad_error = std::max(
                     grad_error, compare(actual, reference, "gradient " + item.first, 2e-6f, 3e-3f));
         }
+
+        snapshot_profile(path, streaming, memory_profile, qwen, logits, loss, ids, mask, labels);
 
         Adam optimizer(AdamConfig(1e-3f, 0.9f, 0.999f, 1e-8f, 0.0f, 0.0f));
         auto params = qwen.get_lora_parameters();
