@@ -41,9 +41,47 @@ neither establishes bitwise identity between attention kernels nor changes the
 earlier failed2e-5 final-adapter coordinate diagnostic. It does not prove full
 Adam trajectory parity, downstream accuracy or every model/input size.
 
+## Completed native short execution checks
+
+All twelve additional short jobs below now pass: three finite-loss native
+updates, all adapter tensors finite and changed between snapshots1 and3, all
+B matrices nonzero, and final export equal to checkpoint3. Reloaded adapters
+also change relative to their imported source; supported offload paths verify
+successful payload reads/writes and retained frozen-weight files before cleanup.
+
+| Model/path | Short jobs completed | Adapter tensors per export |
+| --- | --- | ---: |
+| Qwen3-0.6B | Native baseline and combined memory switches | 392 |
+| Qwen2.5-0.5B | Native baseline and combined memory switches | 336 |
+| Gemma3 270M | Baseline and combined memory switches | 252 |
+| Gemma3 1B-PT | Baseline and separately identified combined retry | 364 |
+| GPT-2 small | Baseline and adapter reload | 48 |
+| GPT-2 medium | Baseline and adapter reload | 96 |
+| GPT-2 small Q8_0 | Quantize/save and Q8-base/adapter reload | 48 |
+
+Qwen baseline jobs were completed during staging; the twelve-job queue contains
+the two Qwen combined jobs, four Gemma jobs, four GPT baseline/reload jobs and
+two Q8 jobs. Initial Qwen3.5 execution is recorded separately in the linked
+initial report. These short tests do not certify the pending long runs.
+
+The first Q8 reload actually exits0 after all three updates, but its2.5-second
+native duration is shorter than the old3-second sampling interval. The collector
+then reports a missing resource file. This collector failure is preserved,
+not treated as a numerical failure or a full acceptance pass. The identified
+retry passes with immediate sampling and a1-second short-job interval. The
+native log verifies adoption of48 Q8 linear tensors, not a float fallback.
+Long jobs retain an approximately3-second resource-sampling interval.
+
+Gemma1B's successful combined retry has sampled loading peak8949.26 MiB,
+minimum available memory2424.75 MiB and maximum battery temperature34 C.
+These phone observations explain the separate9 GiB loading limit; they do not
+qualify this path on lower-memory phones.
+
 ## Native training acceptance queue: launched, not complete
 
 The controller is launched on 2026-11-18 evening CST, after the fixed-point gate.
+All short preflights complete and Qwen3.5 has entered the first300-update
+combined-memory run. All300-update runs remain pending or in progress.
 Qwen3-0.6B and Qwen2.5-0.5B have already completed native-base three-step tests:
 all392/336 adapter tensors finite and changed between snapshots1 and3, all B
 matrices nonzero, and final exports equal to snapshot3. Their logged losses
@@ -76,7 +114,17 @@ validated before proceeding. No optimizer moments, global step or RNG state
 are restored by adapter reload. Snapshots are retained every100 long updates,
 every10 reload updates and every short update.
 
-Device guards stop only this queue's child on RSS above7 GiB, available memory
+An initial Gemma1B combined short attempt stops during weight loading, before
+training, on the original7 GiB process-RSS guard: sampled RSS7497.15 MiB and
+available memory3593.84 MiB, battery34 C. It is a resource-policy stop, not a
+numerical failure or completed pass. Its logs and exit status remain retained.
+An explicit separate retry uses a9 GiB limit for Gemma1B; other models keep7 GiB.
+The original attempt is not overwritten, and no numerical threshold changes.
+The1500 MiB minimum-available-memory guard is retained for every model. This
+records a substantial loading peak; offload's1536 MiB resident-weight budget
+must not be interpreted as an end-to-end process-memory cap.
+
+Device guards stop only this queue's child on the configured RSS limit, available memory
 below1500 MiB, battery below10%, battery temperature above42 C, operator stop,
 or per-job timeout. Each job waits for charging, battery >=15% and battery
 temperature <=38 C before starting. Temperature is a battery reading, not chip
@@ -113,6 +161,16 @@ actual completed/running/pending jobs. Earlier native short tests remain under
 `runs/device_validation_20261118/`. Device identifiers and private contents,
 model weights and generated binaries are not committed. Long-run results
 must be added only after completion; this launch record does not certify them.
+
+A separate read-only analyzer is launched before the first long run. It records
+late/early median step-time ratio (updates21–70 versus last50) and sampled RSS
+medians at20–40% versus80–100% of process duration, excluding initial loading
+from the early window. Slowdown ratio above1.5 or RSS growth above
+max(512 MiB,20% of early median) raises a diagnostic flag. Execution acceptance
+and trend diagnostics remain separate; `stability_analysis.json` and each
+completed long job's `trend_summary.json` retain the results. The time-based RSS
+windows differ from the Mac step-indexed windows; no cross-device benchmark
+comparison is inferred.
 
 Pinned executable SHA-256 (all six device copies verified against host):
 
