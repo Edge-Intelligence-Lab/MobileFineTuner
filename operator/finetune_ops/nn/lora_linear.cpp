@@ -575,10 +575,10 @@ TensorPtr LoRALinear::forward(const TensorPtr& x) const {
                 std::fprintf(stderr,
                     "[QLoRA-profile] call=%lld n=%lld k=%lld m=%lld | "
                     "int8_kernel=%.2fms  dequant=%.2fms  fp32_matmul=%.2fms | "
-                    "cum kernel=%.1f quant=%.1f deq=%.1f fp32mm=%.1f ms\n",
+                    "cum kernel=%.1f quant=%.1f deq=%.1f fp32mm=%.1f alloc=%.1f ms\n",
                     (long long)p_calls, (long long)n, (long long)k, (long long)m,
                     pg_t4 - pg_t3, ta1 - ta0, ta2 - ta1,
-                    p_kernel_ms, p_quant_ms, p_deq_ms, p_fp32mm_ms);
+                    p_kernel_ms, p_quant_ms, p_deq_ms, p_fp32mm_ms, p_alloc_ms);
             }
         } else if (std::getenv("QLORA_PROFILE_FUSED") != nullptr) {
             // env var set but this static was initialised earlier without it
