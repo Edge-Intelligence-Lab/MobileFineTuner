@@ -77,7 +77,8 @@ model phone speed/memory from the tiny emulator tests.
    1200 characters displayed), with full logs retained under `attempts/`.
    `checkpoint_available` means readable current/recorded-predecessor metadata and
    matching payload lengths, not successful tensor/asset validation. Native Resume
-   remains authoritative. If both generations are definitively rejected by the
+   remains authoritative. If every committed candidate (including a sole first
+   checkpoint) is definitively rejected by the
    native validator, or a stopped attempt never committed a checkpoint, use
    **Retry as new task (reinitialize)**: it copies inputs to a new task, leaves the
    original failure directory intact, and starts disabled until explicit Start.

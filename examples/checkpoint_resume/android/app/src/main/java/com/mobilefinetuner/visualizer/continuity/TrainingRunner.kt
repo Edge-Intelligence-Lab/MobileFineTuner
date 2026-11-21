@@ -39,7 +39,7 @@ data class Resources(val charging: Boolean, val battery: Int, val thermal: Int,
 
 class TrainingRunner(private val context: Context) {
     companion object {
-        // ops::resume::CheckpointsExhausted::exit_code (both recorded candidates failed validation).
+        // ops::resume::CheckpointsExhausted::exit_code (all recorded candidates failed validation).
         private const val CHECKPOINTS_EXHAUSTED = 65
         fun executionBudgetMs(slice: Int, pauseGrace: Int): Long {
             require(slice in 1..120) { "Slice must be 1..120 seconds" }

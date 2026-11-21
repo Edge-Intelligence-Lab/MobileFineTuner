@@ -17,7 +17,8 @@ namespace ops::resume {
 using Json = nlohmann::json;
 using TensorMap = std::map<std::string, TensorPtr>;
 
-// Process boundary contract shared with the Android TrainingRunner.
+// All candidates recorded by LATEST (one or two) failed content validation.
+// File access failures must never produce this process exit code.
 struct CheckpointsExhausted : std::runtime_error {
     using std::runtime_error::runtime_error;
     static constexpr int exit_code = 65;

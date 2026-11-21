@@ -309,7 +309,7 @@ class TaskStore(val context: Context) {
         write(File(task(id), "control.json"), value)
         requestSuspend(id)
         val recovery = if (exhaustedPointer != null)
-            "Native validation rejected both committed checkpoints. Retry as new task keeps the original files."
+            "Native validation rejected all committed checkpoint candidates. Retry as new task keeps the original files."
         else if (!noCommittedPointer(id))
             "Checkpoint candidate retained; Start / Resume validates it natively."
         else if (!hasAttemptArtifacts(id)) "No native attempt was made. Start / Resume retries this same task after fixing the error."

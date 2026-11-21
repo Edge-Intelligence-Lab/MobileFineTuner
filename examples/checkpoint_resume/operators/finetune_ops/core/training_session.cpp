@@ -189,9 +189,11 @@ void write_tensor_file(const std::string& path, const TensorMap& tensors) {
 TensorMap read_tensor_file(const std::string& path) {
     std::ifstream in(path,std::ios::binary);
     if (!in) throw std::runtime_error("Cannot read checkpoint tensors");
-    const uint64_t bytes=fs::file_size(path); unsigned char le[8]; read_all(in,le,8);
+    const uint64_t bytes=fs::file_size(path);
+    if (bytes<8) throw InvalidGeneration("Invalid tensor header size");
+    unsigned char le[8]; read_all(in,le,8);
     uint64_t len=0; for(int i=0;i<8;++i) len |= static_cast<uint64_t>(le[i])<<(8*i);
-    if (bytes<8 || len>bytes-8 || len>64*1024*1024 || !len) throw InvalidGeneration("Invalid tensor header size");
+    if (len>bytes-8 || len>64*1024*1024 || !len) throw InvalidGeneration("Invalid tensor header size");
     std::string text(len,' '); read_all(in,text.data(),len); Json h=Json::parse(text);
     if (!h.is_object() || h.empty()) throw InvalidGeneration("Invalid tensor header");
     uint64_t expected=0; TensorMap out;
@@ -231,7 +233,9 @@ TrainingSession::TrainingSession(const std::string& run_dir, bool restoring,
             if(config_.contains("executable") && config_.at("executable")!=stamp(arguments.at(0))) throw std::runtime_error("Executable differs from saved run; use original build");
             const auto latest=read_json((fs::path(run_dir_)/"LATEST").string());
             if(latest.at("schema")!=1) throw std::runtime_error("Unknown LATEST schema");
-            prune_payloads(run_dir_,latest.at("current"),latest.at("previous"));
+            check_component(latest.at("current"));
+            const std::string previous=latest.at("previous");
+            if(!previous.empty()) check_component(previous);
         } else {
             if(fs::exists(cfgpath) || fs::exists(fs::path(run_dir_)/"LATEST")) throw std::runtime_error("Run already exists; use --resume_state");
             config_={{"schema",1},{"program",program},{"arguments",arguments},{"working_directory",fs::current_path().string()},
@@ -240,9 +244,6 @@ TrainingSession::TrainingSession(const std::string& run_dir, bool restoring,
             write_json_durable(cfgpath.string(),config_); sync_dir(run_dir_);
         }
         mkdir_sync(fs::path(run_dir_)/"training_state"); mkdir_sync(fs::path(run_dir_)/"sessions");
-        // The lock excludes a live owner. Recover caches left by an unannounced kill.
-        for(const auto& old:fs::directory_iterator(fs::path(run_dir_)/"sessions"))
-            if(old.is_directory() && !old.is_symlink()) prune_shard_cache(old.path());
         session_id_=unique_id(); session_dir_=(fs::path(run_dir_)/"sessions"/session_id_).string();
         mkdir_sync(session_dir_); mkdir_sync(fs::path(session_dir_)/"artifacts");
         event_fd_=::open((fs::path(session_dir_)/"events.jsonl").c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
@@ -337,15 +338,14 @@ std::optional<RestoredState> TrainingSession::restore(const NamedParameters& par
         catch(const Json::exception& e) { throw InvalidGeneration(e.what()); }
     };
     try { s=candidate_state(selected); }
-    catch(const std::exception& e) {
-        if(prev.empty() || prev==selected) throw;
+    catch(const InvalidGeneration& e) {
+        if(prev.empty()) throw CheckpointsExhausted(std::string("Only committed checkpoint is invalid: ")+e.what());
+        if(prev==selected) throw; // malformed pointer, not an exhaustion verdict
         std::cerr << "Current checkpoint invalid (" << e.what() << "); trying recorded predecessor only\n";
         selected=prev;
         try { s=candidate_state(selected); }
         catch(const InvalidGeneration& prior) {
-            if(dynamic_cast<const InvalidGeneration*>(&e))
-                throw CheckpointsExhausted(std::string("Both committed checkpoints are invalid: ")+e.what()+"; "+prior.what());
-            throw;
+            throw CheckpointsExhausted(std::string("Both committed checkpoints are invalid: ")+e.what()+"; "+prior.what());
         }
         fallback=true;
     }
@@ -354,6 +354,10 @@ std::optional<RestoredState> TrainingSession::restore(const NamedParameters& par
     current_=selected; previous_=s.at("manifest").at("previous").get<std::string>(); restored_=true;
     event({{"type","resume"},{"generation",selected},{"fallback",fallback},
            {"completed_updates",s.at("trainer").at("completed_updates")},{"state_restore_metrics",probe.finish()}});
+    // Leave the durable pointer and its two slots intact, even after fallback.
+    prune_payloads(run_dir_,latest.at("current"),prev);
+    for(const auto& old:fs::directory_iterator(fs::path(run_dir_)/"sessions"))
+        if(old.path()!=session_dir_ && old.is_directory() && !old.is_symlink()) prune_shard_cache(old.path());
     return RestoredState{s.at("trainer"),s.at("dataset_state"),selected,s.at("status"),fallback};
 }
 void TrainingSession::resume_ready() {

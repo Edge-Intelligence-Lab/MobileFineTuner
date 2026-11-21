@@ -47,12 +47,37 @@ int main() {
         auto abandoned_cache=fs::path(run)/"sessions"/"test-dead-session"/"artifacts"/"shards";
         fs::create_directories(abandoned_cache);
         {std::ofstream cache(abandoned_cache/"block.bin"); cache<<"disposable";}
+        const auto latest=read_json(run+"/LATEST");
+        const auto parent=fs::path(run)/"training_state";
+        const auto current=parent/committed/"state.safetensors";
+        const auto previous=parent/latest.at("previous").get<std::string>()/"state.safetensors";
+        const auto offline=current.parent_path()/"temporarily-offline";
+        fs::rename(current,offline);
+        {
+            TrainingSession s(run,true,"test",{},1,0,0); s.track_assets({});
+            const float before=param->data<float>()[0];
+            Adam fresh(cfg);
+            bool unavailable=false;
+            try { s.restore(named,fresh); }
+            catch(const fs::filesystem_error& e) { unavailable=e.code()==std::errc::no_such_file_or_directory; }
+            require(unavailable,"Unavailable current did not propagate its I/O error");
+            require(param->data<float>()[0]==before && fresh.export_named_state(named).tensors.empty(),
+                    "Failed restore changed model or optimizer");
+            require(read_json(run+"/LATEST")==latest && fs::exists(offline) && fs::exists(previous),
+                    "Failed restore changed the durable checkpoint");
+            require(payload_count(run)==2 && fs::exists(abandoned_cache/"block.bin"),
+                    "Failed restore reclaimed orphan payload or shard cache");
+        }
+        fs::rename(offline,current);
         float restored_value;
         {
             TrainingSession s(run,true,"test",{},1,0,0); s.track_assets({});
-            require(payload_count(run)==2,"Orphan payload not reclaimed on restart");
-            require(!fs::exists(abandoned_cache),"Killed session shard cache not reclaimed");
+            require(payload_count(run)==3 && fs::exists(abandoned_cache),"Cleanup before restore validation");
             Adam fresh(cfg); auto state=s.restore(named,fresh);
+            require(state && !state->fallback && state->generation==committed,"Did not retry the original checkpoint");
+            require(payload_count(run)==2,"Orphan payload not reclaimed on restart");
+            require(fs::exists(current) && fs::exists(previous),"Cleanup removed a committed generation");
+            require(!fs::exists(abandoned_cache),"Killed session shard cache not reclaimed");
             require(state && state->trainer.at("completed_updates")==1,"Selected orphan/failed generation");
             restored_value=param->data<float>()[0];
             update(named,fresh); s.event({{"type","update"},{"completed_updates",2}});
@@ -79,6 +104,31 @@ int main() {
             fails([&]{s.commit(named,fresh,"{}",progress(0),"suspended");});
             s.set_commit_test_hook({});
             fails([&]{s.commit(named,fresh,"{}",progress(0),"suspended");});
+        }
+        const std::string single=(root/"single").string();
+        {
+            TrainingSession s(single,false,"test",{},1,0,0); s.track_assets({});
+            s.commit(named,opt,"{}",progress(0),"suspended");
+        }
+        const auto only=read_json(single+"/LATEST");
+        require(only.at("previous")=="","Single generation fixture has a predecessor");
+        const auto only_dir=fs::path(single)/"training_state"/only.at("current").get<std::string>();
+        fs::rename(only_dir/"state.json",only_dir/"offline");
+        {
+            TrainingSession s(single,true,"test",{},1,0,0); s.track_assets({});
+            Adam fresh(cfg); bool unavailable=false;
+            try { s.restore(named,fresh); }
+            catch(const fs::filesystem_error& e) { unavailable=e.code()==std::errc::no_such_file_or_directory; }
+            require(unavailable,"Missing sole candidate did not propagate its I/O error");
+        }
+        fs::rename(only_dir/"offline",only_dir/"state.json");
+        {std::ofstream bad(only_dir/"state.json",std::ios::trunc); bad<<"broken";}
+        {
+            TrainingSession s(single,true,"test",{},1,0,0); s.track_assets({});
+            Adam fresh(cfg); bool exhausted=false;
+            try { s.restore(named,fresh); }
+            catch(const CheckpointsExhausted& e) { exhausted=e.exit_code==65; }
+            require(exhausted && read_json(single+"/LATEST")==only,"Invalid sole candidate did not exhaust in place");
         }
         const std::string asset=(root/"asset.json").string(); write_json_durable(asset,{{"x",1}});
         const std::string identity=(root/"identity").string();
