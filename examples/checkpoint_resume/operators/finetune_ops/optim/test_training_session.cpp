@@ -54,7 +54,9 @@ int main() {
         const auto offline=current.parent_path()/"temporarily-offline";
         fs::rename(current,offline);
         {
-            TrainingSession s(run,true,"test",{},1,0,0); s.track_assets({});
+            TrainingSession s(run,true,"test",{},1,0,0);
+            require(!fs::exists(abandoned_cache),"Old shard cache not reclaimed before new shard initialization");
+            s.track_assets({});
             const float before=param->data<float>()[0];
             Adam fresh(cfg);
             bool unavailable=false;
@@ -65,27 +67,44 @@ int main() {
                     "Failed restore changed model or optimizer");
             require(read_json(run+"/LATEST")==latest && fs::exists(offline) && fs::exists(previous),
                     "Failed restore changed the durable checkpoint");
-            require(payload_count(run)==2 && fs::exists(abandoned_cache/"block.bin"),
-                    "Failed restore reclaimed orphan payload or shard cache");
+            require(payload_count(run)==2,"Failed restore reclaimed orphan tensor payload");
+            for(const auto& entry:fs::directory_iterator(parent))
+                require(fs::exists(entry.path()/"state.json"),"Failed restore reclaimed checkpoint metadata payload");
         }
         fs::rename(offline,current);
         float restored_value;
         {
             TrainingSession s(run,true,"test",{},1,0,0); s.track_assets({});
-            require(payload_count(run)==3 && fs::exists(abandoned_cache),"Cleanup before restore validation");
+            require(payload_count(run)==3,"Checkpoint payload cleanup before restore validation");
             Adam fresh(cfg); auto state=s.restore(named,fresh);
             require(state && !state->fallback && state->generation==committed,"Did not retry the original checkpoint");
             require(payload_count(run)==2,"Orphan payload not reclaimed on restart");
             require(fs::exists(current) && fs::exists(previous),"Cleanup removed a committed generation");
-            require(!fs::exists(abandoned_cache),"Killed session shard cache not reclaimed");
             require(state && state->trainer.at("completed_updates")==1,"Selected orphan/failed generation");
             restored_value=param->data<float>()[0];
             update(named,fresh); s.event({{"type","update"},{"completed_updates",2}});
             s.commit(named,fresh,"{}",progress(2),"suspended");
             require(payload_count(run)==2,"Payload retention exceeded current plus previous");
-            auto latest=read_json(run+"/LATEST");
-            auto cur=latest.at("current").get<std::string>();
-            std::ofstream bad(run+"/training_state/"+cur+"/state.safetensors",std::ios::trunc); bad<<"broken";
+        }
+        {
+            const auto pointer=read_json(run+"/LATEST");
+            const auto dir=parent/pointer.at("current").get<std::string>();
+            const auto manifest=read_json((dir/"manifest.json").string());
+            auto malformed=manifest; malformed["previous"]=nullptr;
+            write_json_durable((dir/"manifest.json").string(),malformed);
+            TrainingSession s(run,true,"test",{},1,0,0); s.track_assets({});
+            Adam fresh(cfg); int prepared=0, applied=0;
+            auto state=s.restore(named,fresh,[&](const Json& trainer,const std::string&) {
+                ++prepared;
+                require(trainer.at("completed_updates")==1,"Prepared malformed current generation");
+                return [&] { ++applied; };
+            });
+            require(state && state->fallback && state->generation==committed && prepared==1 && applied==1,
+                    "Did not apply only the valid predecessor");
+            require(param->data<float>()[0]==restored_value && read_json(run+"/LATEST")==pointer,
+                    "Manifest fallback changed pointer or selected wrong weights");
+            write_json_durable((dir/"manifest.json").string(),manifest);
+            std::ofstream bad(dir/"state.safetensors",std::ios::trunc); bad<<"broken";
         }
         {
             TrainingSession s(run,true,"test",{},1,0,0); s.track_assets({});
@@ -113,6 +132,37 @@ int main() {
         const auto only=read_json(single+"/LATEST");
         require(only.at("previous")=="","Single generation fixture has a predecessor");
         const auto only_dir=fs::path(single)/"training_state"/only.at("current").get<std::string>();
+        const auto manifest_path=(only_dir/"manifest.json").string();
+        const auto state_path=(only_dir/"state.json").string();
+        const auto manifest=read_json(manifest_path), state=read_json(state_path);
+        auto reject_metadata=[&](Json bad_manifest,const Json& bad_state) {
+            write_json_durable(state_path,bad_state);
+            bad_manifest["files"]["state.json"]=fs::file_size(state_path);
+            write_json_durable(manifest_path,bad_manifest);
+            TrainingSession s(single,true,"test",{},1,0,0); s.track_assets({});
+            NamedParameters live={{named[0].first,zeros({3})}};
+            Adam fresh(cfg); const auto before=fresh.export_named_state(live);
+            bool prepared=false, applied=false, exhausted=false;
+            try {
+                s.restore(live,fresh,[&](const Json&,const std::string&) {
+                    prepared=true; return [&] { applied=true; };
+                });
+            } catch(const CheckpointsExhausted&) { exhausted=true; }
+            require(exhausted && !prepared && !applied,"Invalid metadata reached prepare/apply or failed untyped");
+            const auto after=fresh.export_named_state(live);
+            require(after.metadata==before.metadata && after.tensors.empty(),"Invalid metadata changed Adam");
+            for(int i=0;i<3;++i) require(live[0].second->data<float>()[i]==0,"Invalid metadata changed weights");
+            require(read_json(single+"/LATEST")==only,"Invalid metadata replaced LATEST");
+        };
+        for(const auto& prev:Json::array({nullptr,"../escape",only.at("current")})) {
+            auto bad=manifest; bad["previous"]=prev; reject_metadata(bad,state);
+        }
+        auto missing=manifest; missing.erase("previous"); reject_metadata(missing,state);
+        auto bad=state; bad["status"]=nullptr; reject_metadata(manifest,bad);
+        bad=state; bad["trainer"]["completed_updates"]=0.0; reject_metadata(manifest,bad);
+        bad=state; bad["dataset_state"]=Json::object(); reject_metadata(manifest,bad);
+        write_json_durable(state_path,state);
+        write_json_durable(manifest_path,manifest);
         fs::rename(only_dir/"state.json",only_dir/"offline");
         {
             TrainingSession s(single,true,"test",{},1,0,0); s.track_assets({});

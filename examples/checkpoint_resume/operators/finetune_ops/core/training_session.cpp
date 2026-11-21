@@ -68,7 +68,7 @@ void read_all(std::ifstream& in, void* p, size_t n) {
     logical_io().read_bytes+=n; ++logical_io().reads;
 }
 void check_component(const std::string& s) {
-    if (s.empty() || s == "." || s == ".." || s.find('/') != s.npos || s.find('\\') != s.npos)
+    if (s.empty() || s == "." || s == ".." || s.find('/') != s.npos || s.find('\\') != s.npos || s.find('\0') != s.npos)
         throw std::runtime_error("Invalid checkpoint generation name");
 }
 void prune_payloads(const fs::path& root,const std::string& current,const std::string& previous) {
@@ -88,6 +88,7 @@ void prune_payloads(const fs::path& root,const std::string& current,const std::s
 }
 void prune_shard_cache(const fs::path& session) {
     std::error_code ec;
+    if (!fs::is_directory(fs::symlink_status(session/"artifacts",ec))) return;
     fs::remove_all(session/"artifacts"/"shards",ec);
     if(ec) std::cerr<<"Disposable shard cache cleanup deferred: "<<ec.message()<<"\n";
 }
@@ -129,6 +130,8 @@ void check_tensor(const TensorPtr& t) {
     for (int64_t i=0;i<t->numel();++i) if (!std::isfinite(t->data<float>()[i])) throw std::runtime_error("Nonfinite checkpoint tensor");
 }
 void check_progress(const Json& j) {
+    if (!j.is_object() || !j.at("completed_updates").is_number_integer() || !j.at("total_steps").is_number_integer())
+        throw std::runtime_error("Invalid committed training counters");
     const auto step = j.at("completed_updates").get<int64_t>();
     const auto total = j.at("total_steps").get<int64_t>();
     if (step < 0 || total <= 0 || step > total) throw std::runtime_error("Invalid committed training progress");
@@ -138,12 +141,18 @@ Json validate_generation(const fs::path& root, const std::string& g, TensorMap& 
     fs::path p = root / "training_state" / g;
     Json manifest = read_json((p / "manifest.json").string());
     if (manifest.at("schema") != 1 || manifest.at("generation") != g) throw InvalidGeneration("Invalid generation manifest");
+    const auto& previous = manifest.at("previous").get_ref<const std::string&>();
+    if (previous == g) throw InvalidGeneration("Self-referencing checkpoint generation");
+    if (!previous.empty()) validate_content([&] { check_component(previous); });
     for (const auto* name : {"state.json", "state.safetensors"})
         if (fs::file_size(p/name) != manifest.at("files").at(name).get<uint64_t>()) throw InvalidGeneration("Checkpoint file size mismatch");
     Json s = read_json((p/"state.json").string());
     if (s.at("schema") != 1) throw InvalidGeneration("Unknown checkpoint schema");
+    const auto& status = s.at("status");
+    if (status != "running" && status != "suspended" && status != "completed") throw InvalidGeneration("Invalid checkpoint status");
     validate_content([&] { check_progress(s.at("trainer")); });
-    if (manifest.at("completed_updates") != s.at("trainer").at("completed_updates")) throw InvalidGeneration("Checkpoint progress mismatch");
+    if (!manifest.at("completed_updates").is_number_integer() || manifest.at("completed_updates") != s.at("trainer").at("completed_updates"))
+        throw InvalidGeneration("Checkpoint progress mismatch");
     const auto dataset=Json::parse(s.at("dataset_state").get<std::string>());
     if(!dataset.is_object()) throw InvalidGeneration("Invalid dataset state");
     if (manifest.contains("best_file") && !manifest.at("best_file").is_null()) {
@@ -244,6 +253,9 @@ TrainingSession::TrainingSession(const std::string& run_dir, bool restoring,
             write_json_durable(cfgpath.string(),config_); sync_dir(run_dir_);
         }
         mkdir_sync(fs::path(run_dir_)/"training_state"); mkdir_sync(fs::path(run_dir_)/"sessions");
+        // The exclusive run lock guarantees old session caches have no live owner.
+        for(const auto& old:fs::directory_iterator(fs::path(run_dir_)/"sessions"))
+            if(fs::is_directory(old.symlink_status())) prune_shard_cache(old.path());
         session_id_=unique_id(); session_dir_=(fs::path(run_dir_)/"sessions"/session_id_).string();
         mkdir_sync(session_dir_); mkdir_sync(fs::path(session_dir_)/"artifacts");
         event_fd_=::open((fs::path(session_dir_)/"events.jsonl").c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
@@ -356,8 +368,6 @@ std::optional<RestoredState> TrainingSession::restore(const NamedParameters& par
            {"completed_updates",s.at("trainer").at("completed_updates")},{"state_restore_metrics",probe.finish()}});
     // Leave the durable pointer and its two slots intact, even after fallback.
     prune_payloads(run_dir_,latest.at("current"),prev);
-    for(const auto& old:fs::directory_iterator(fs::path(run_dir_)/"sessions"))
-        if(old.path()!=session_dir_ && old.is_directory() && !old.is_symlink()) prune_shard_cache(old.path());
     return RestoredState{s.at("trainer"),s.at("dataset_state"),selected,s.at("status"),fallback};
 }
 void TrainingSession::resume_ready() {
