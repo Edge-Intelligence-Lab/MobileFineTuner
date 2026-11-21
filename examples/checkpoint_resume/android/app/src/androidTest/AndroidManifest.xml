@@ -1,0 +1,10 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Instrumentation runs as the target UID, not the test APK UID. -->
+        <activity android:name="com.mobilefinetuner.visualizer.continuity.PressureActivity"
+            android:exported="true"
+            android:permission="com.mobilefinetuner.continuity.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+            android:process=":pressure" android:noHistory="true"
+            android:theme="@android:style/Theme.Material.Light" />
+    </application>
+</manifest>

@@ -1,0 +1,56 @@
+========== Gemma LoRA 微调 ==========
+
+[INFO] model_dir=/example/workspace/gemma-3-270m
+[INFO] pretokenized_path=/example/workspace/data/wikitext2/pretokenized_gemma/wt2_gemma_tokens.bin
+[INFO] pretokenized_meta=/example/workspace/data/wikitext2/pretokenized_gemma/meta.json
+[Energy] pm_interval=0 batt_th=20 temp_th=42 fb_hi/lo=2/0.5 ft_hi/lo=2/0.5 manual_batt=100 manual_temp=30 schedule=""
+[Shard] enable=ON dir=/example/workspace/runs/shard_aggressive_20251204_145825/gemma_270m/shard_disk budget_mb=100 disk_fp16=ON
+✅ Gemma weights loaded
+[Shard] Adjust budget to fit largest parameter: 640 MB
+[GemmaLoraInjector] Injected 72 LoRA modules across 18 layers.
+[GemmaLoRA]
+  Rank: 8
+  Alpha: 32
+  Dropout: 0.1
+  Targets: q_proj, k_proj, v_proj, o_proj
+[Pretokenized] split=train tokens=124800 chunks=974
+[Pretokenized] split=valid tokens=13052 chunks=101
+Train sequences: 974, Eval sequences: 101
+[GemmaTrainer] LR=0.0001, epochs=1, grad_accum=1
+
+=== Gemma Epoch 1/1 ===
+[Step 1] Loss=7.55168 PPL=1903.94 LR=7.14286e-06
+[Step 2] Loss=6.83055 PPL=925.699 LR=1.42857e-05
+[Step 3] Loss=7.77401 PPL=2377.99 LR=2.14286e-05
+[Step 4] Loss=7.455 PPL=1728.49 LR=2.85714e-05
+[Step 5] Loss=7.62895 PPL=2056.89 LR=3.57143e-05
+[Step 6] Loss=7.98286 PPL=2930.31 LR=4.28571e-05
+[Step 7] Loss=7.41131 PPL=1654.59 LR=5e-05
+[Step 8] Loss=8.01906 PPL=3038.31 LR=5.71429e-05
+[Step 9] Loss=7.50666 PPL=1820.13 LR=6.42857e-05
+[Step 10] Loss=7.20203 PPL=1342.15 LR=7.14286e-05
+[Step 11] Loss=7.25026 PPL=1408.48 LR=7.85714e-05
+[Step 12] Loss=6.45382 PPL=635.123 LR=8.57143e-05
+[Step 13] Loss=7.04509 PPL=1147.21 LR=9.28571e-05
+[Step 14] Loss=6.83288 PPL=927.861 LR=0.0001
+[Step 15] Loss=6.39635 PPL=599.65 LR=9.97886e-05
+[Step 16] Loss=6.35516 PPL=575.452 LR=9.95772e-05
+[Step 17] Loss=6.83459 PPL=929.447 LR=9.93658e-05
+[Step 18] Loss=6.10217 PPL=446.824 LR=9.91543e-05
+[Step 19] Loss=6.54658 PPL=696.857 LR=9.89429e-05
+[Step 20] Loss=6.78512 PPL=884.584 LR=9.87315e-05
+[Step 21] Loss=6.51631 PPL=676.082 LR=9.85201e-05
+[Step 22] Loss=6.61756 PPL=748.117 LR=9.83087e-05
+[Step 23] Loss=5.94481 PPL=381.768 LR=9.80972e-05
+[Step 24] Loss=5.90429 PPL=366.608 LR=9.78858e-05
+[Step 25] Loss=5.94294 PPL=381.052 LR=9.76744e-05
+[Step 26] Loss=6.17884 PPL=482.43 LR=9.7463e-05
+[Step 27] Loss=5.7943 PPL=328.423 LR=9.72516e-05
+[Step 28] Loss=6.4096 PPL=607.651 LR=9.70402e-05
+[Step 29] Loss=6.28274 PPL=535.255 LR=9.68287e-05
+[Step 30] Loss=5.86957 PPL=354.097 LR=9.66173e-05
+Epoch 1 avg loss: 6.78084
+[GemmaTrainer] Reached max_steps=30, stopping early.
+[Save] Writing LoRA adapter...
+[GemmaLoraInjector] Saved 144 LoRA tensors to /example/workspace/runs/shard_aggressive_20251204_145825/gemma_270m/shard_100mb/gemma_lora.safetensors
+🎉 Gemma LoRA 训练完成
