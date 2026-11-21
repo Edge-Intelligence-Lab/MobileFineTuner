@@ -1,0 +1,9 @@
+# Include the small parser fixture in GitHub's source archives.
+android/app/src/test/resources/samples/rss.csv -export-ignore
+# These directories contain implementation and test code, not datasets.
+operators/finetune_ops/data -export-ignore
+operators/finetune_ops/data/** -export-ignore
+android/app/src/main/java/com/mobilefinetuner/visualizer/data -export-ignore
+android/app/src/main/java/com/mobilefinetuner/visualizer/data/** -export-ignore
+android/app/src/test/java/com/mobilefinetuner/visualizer/data -export-ignore
+android/app/src/test/java/com/mobilefinetuner/visualizer/data/** -export-ignore

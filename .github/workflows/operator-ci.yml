@@ -34,7 +34,7 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +61,18 @@ jobs:
 
       - name: Release tree audit
         run: bash scripts/check_release_tree.sh
+
+      - name: Exercise checkpoint resume and elastic batching
+        working-directory: examples/checkpoint_resume
+        run: |
+          build="$RUNNER_TEMP/mft-resume"
+          cmake -S . -B "$build" -DCMAKE_BUILD_TYPE=Release -DUSE_BLAS=ON -DBUILD_TESTS=ON
+          cmake --build "$build" -j3
+          ctest --test-dir "$build" --output-on-failure
+          python3 -B tools/make_android_fixture.py
+          python3 -B tests/test_resume_process.py --binary "$build/operators/test_resume_process"
+          python3 -B tests/test_elastic_microbatch.py --binary "$build/mft_qwen_resume" --ragged \
+            --model android/app/src/main/assets/tiny_qwen/model --output "$build/ragged"
 
       - name: Configure
         run: >

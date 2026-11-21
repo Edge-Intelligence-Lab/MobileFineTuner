@@ -1,0 +1,152 @@
+
+========== GPT-2 LoRA Finetune (专业版) ==========
+
+[配置]
+  BLAS          : ON (compiled)
+  data_dir       : /example/workspace/data/wikitext2/wikitext-2-raw
+  pretrained_dir : /example/workspace/gpt2_lora_finetune/pretrained/gpt2
+  lora_out       : /example/workspace/runs/energy_benchmark_20251202_133149/gpt2_with_energy/lora.safetensors
+  epochs         : 0
+  batch_size     : 8
+  grad_accum     : 1
+  seq_len        : 128
+  rank/alpha     : 8/16
+  lr/wd          : 0.0002/0
+  warmup_steps   : 20
+  clip_grad_norm : 1
+  lora_dropout   : 0
+  data_fraction  : 0.5
+  log_interval   : 10
+  eval_interval  : 0
+  save_every     : 0
+  ema_beta       : 0.9
+  seed           : 42
+  [Energy] pm_interval=1 batt_th=20 temp_th=42 fb_hi/lo=2/0.5 ft_hi/lo=2/0.5 manual_batt=100 manual_temp=30 schedule="0-:300"
+  [Shard] enable=OFF dir=/tmp/gft_param_shard budget_mb=512 disk_fp16=ON
+
+[1/6] 加载预训练模型...
+[GPT2Model] Initialized with 12 layers, 768 hidden, 12 heads
+[GPT2Model] Tied lm_head.weight ↔ wte.weight
+  ✓ 模型加载完成
+
+[2/6] 注入/恢复 LoRA...
+[LoraInjector] Injected 24 LoRA modules to 12 layers
+[LoRA Info]
+  Rank: 8
+  Alpha: 16
+  Scale: 2
+  Total LoRA params: 442368
+  Trainable param count: 48
+  ✓ LoRA注入完成: 48 个可训练参数
+
+[3/6] 加载数据集...
+[GPT2BPETokenizer] Loaded: vocab_size=50257, merges=49992
+[WT2] window loaded: tokens=100000 global_offset=0
+  ✓ 训练集: 18001 序列
+  ✓ 验证集: 1876 序列
+
+[训练计划]
+  epochs         : 0
+  steps_per_epoch: 2251
+  total_steps    : 200
+  有效batch大小  : 8 (micro=8 × accum=1)
+
+[4/6] 初始化优化器...
+  ✓ Adam优化器就绪
+
+[5/6] 开始训练...
+========================================
+
+[Train] epoch 1/0 | step 10/2251 (global 10/200) | lr 0.000100 | loss 4.0012 | ppl 54.66 | grad_norm 0.913 | tokens 1024
+[WT2] window loaded: tokens=100000 global_offset=92800
+[Train] epoch 1/0 | step 20/2251 (global 20/200) | lr 0.000200 | loss 3.6844 | ppl 39.82 | grad_norm 1.000 | tokens 1024
+[WT2] window loaded: tokens=100000 global_offset=508928
+[Train] epoch 1/0 | step 30/2251 (global 30/200) | lr 0.000199 | loss 3.8258 | ppl 45.87 | grad_norm 0.662 | tokens 1024
+[WT2] window loaded: tokens=100000 global_offset=1746816
+[Train] epoch 1/0 | step 40/2251 (global 40/200) | lr 0.000195 | loss 3.9748 | ppl 53.24 | grad_norm 1.000 | tokens 1024
+[Train] epoch 1/0 | step 50/2251 (global 50/200) | lr 0.000189 | loss 4.1445 | ppl 63.09 | grad_norm 1.000 | tokens 1024
+[WT2] window loaded: tokens=100000 global_offset=1243136
+[Train] epoch 1/0 | step 60/2251 (global 60/200) | lr 0.000180 | loss 3.7230 | ppl 41.39 | grad_norm 0.648 | tokens 1024
+[WT2] window loaded: tokens=100000 global_offset=248192
+[Train] epoch 1/0 | step 70/2251 (global 70/200) | lr 0.000169 | loss 3.4751 | ppl 32.30 | grad_norm 0.528 | tokens 1024
+[WT2] window loaded: tokens=100000 global_offset=48768
+[Train] epoch 1/0 | step 80/2251 (global 80/200) | lr 0.000156 | loss 3.6511 | ppl 38.52 | grad_norm 0.576 | tokens 1024
+[Train] epoch 1/0 | step 90/2251 (global 90/200) | lr 0.000142 | loss 3.0836 | ppl 21.84 | grad_norm 0.393 | tokens 1024
+[WT2] window loaded: tokens=100000 global_offset=896768
+[Train] epoch 1/0 | step 100/2251 (global 100/200) | lr 0.000127 | loss 3.1082 | ppl 22.38 | grad_norm 0.383 | tokens 1024
+
+=== Memory Manager Statistics ===
+Memory Pool Statistics:
+  Total allocated: 625 MB
+  Currently in use: 625 MB
+  Peak usage: 3294 MB
+  Available: 0 MB
+  Total blocks: 319
+  Bucket 4: 112 blocks
+  Bucket 6: 36 blocks
+  Bucket 7: 108 blocks
+  Bucket 9: 12 blocks
+  Bucket 14: 13 blocks
+  Bucket 15: 12 blocks
+  Bucket 16: 24 blocks
+  Bucket 20: 2 blocks
+Tensor cache size: 0
+Computation graph size: 0
+System memory usage: 1822 MB
+System available memory: 16809 MB
+Memory pressure: NO
+===============================
+
+[WT2] window loaded: tokens=100000 global_offset=1745152
+[Train] epoch 1/0 | step 110/2251 (global 110/200) | lr 0.000112 | loss 3.1972 | ppl 24.46 | grad_norm 0.406 | tokens 1024
+[WT2] window loaded: tokens=100000 global_offset=1490048
+[Train] epoch 1/0 | step 120/2251 (global 120/200) | lr 0.000096 | loss 3.1503 | ppl 23.34 | grad_norm 0.539 | tokens 1024
+[Train] epoch 1/0 | step 130/2251 (global 130/200) | lr 0.000081 | loss 3.2939 | ppl 26.95 | grad_norm 0.469 | tokens 1024
+[WT2] window loaded: tokens=100000 global_offset=1658112
+[Train] epoch 1/0 | step 140/2251 (global 140/200) | lr 0.000066 | loss 3.3637 | ppl 28.90 | grad_norm 0.414 | tokens 1024
+[WT2] window loaded: tokens=100000 global_offset=2084224
+[Train] epoch 1/0 | step 150/2251 (global 150/200) | lr 0.000053 | loss 3.1418 | ppl 23.15 | grad_norm 0.417 | tokens 1024
+[WT2] window loaded: tokens=100000 global_offset=1933184
+[Train] epoch 1/0 | step 160/2251 (global 160/200) | lr 0.000042 | loss 3.2199 | ppl 25.03 | grad_norm 0.417 | tokens 1024
+[WT2] window loaded: tokens=100000 global_offset=745216
+[Train] epoch 1/0 | step 170/2251 (global 170/200) | lr 0.000033 | loss 3.2891 | ppl 26.82 | grad_norm 0.385 | tokens 1024
+[Train] epoch 1/0 | step 180/2251 (global 180/200) | lr 0.000026 | loss 2.9023 | ppl 18.22 | grad_norm 0.372 | tokens 1024
+[WT2] window loaded: tokens=100000 global_offset=891776
+[Train] epoch 1/0 | step 190/2251 (global 190/200) | lr 0.000022 | loss 3.1450 | ppl 23.22 | grad_norm 0.363 | tokens 1024
+[WT2] window loaded: tokens=100000 global_offset=1493632
+[Train] epoch 1/0 | step 200/2251 (global 200/200) | lr 0.000020 | loss 2.9907 | ppl 19.90 | grad_norm 0.391 | tokens 1024
+
+=== Memory Manager Statistics ===
+Memory Pool Statistics:
+  Total allocated: 625 MB
+  Currently in use: 625 MB
+  Peak usage: 3294 MB
+  Available: 0 MB
+  Total blocks: 319
+  Bucket 4: 112 blocks
+  Bucket 6: 36 blocks
+  Bucket 7: 108 blocks
+  Bucket 9: 12 blocks
+  Bucket 14: 13 blocks
+  Bucket 15: 12 blocks
+  Bucket 16: 24 blocks
+  Bucket 20: 2 blocks
+Tensor cache size: 0
+Computation graph size: 0
+System memory usage: 1602 MB
+System available memory: 20565 MB
+Memory pressure: NO
+===============================
+
+
+[6/6] 保存最终LoRA权重...
+[LoraSaver] Saved 48 tensors to /example/workspace/runs/energy_benchmark_20251202_133149/gpt2_with_energy/lora.safetensors
+  ✓ LoRA已保存到: /example/workspace/runs/energy_benchmark_20251202_133149/gpt2_with_energy/lora.safetensors
+
+========================================
+✅ 训练完成！
+  总步数: 200
+  总tokens: 204800
+  最终EMA loss: 3.1380
+========================================
+

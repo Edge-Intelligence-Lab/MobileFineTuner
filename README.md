@@ -47,6 +47,7 @@ Unlike simulation-based or desktop-bound approaches, MobileFineTuner is built ar
 - Stable C++ operator/autograd/LoRA core with unit tests and installable CMake package.
 - Five local training smoke entrypoints: GPT-2 small, GPT-2 medium, Gemma 270M, Gemma 1B-PT, and Qwen.
 - Android native build/run path validated with a synthetic Qwen LoRA smoke test, including loss/backward/update and 5 ms RSS sampling.
+- [Checkpoint resume and Android suspend](examples/checkpoint_resume/): opt-in Qwen/Gemma trainers with full-state resume, user and resource-pressure pauses, and adjustable physical batch size.
 - Full pretrained weights, benchmark datasets, adapters, run logs, and phone QA media are external runtime artifacts and are not bundled in the source release.
 
 ### Key Features

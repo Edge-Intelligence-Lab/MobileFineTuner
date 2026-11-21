@@ -1,0 +1,23 @@
+.DS_Store
+.gradle/
+.cxx/
+build/
+build-*/
+/out/
+__pycache__/
+local.properties
+*.keystore
+*.jks
+*.apk
+/android/app/src/main/jniLibs/
+
+# The parent project's data/ rule is for datasets, not source packages.
+!/operators/finetune_ops/data/
+!/android/app/src/main/java/com/mobilefinetuner/visualizer/data/
+!/android/app/src/test/java/com/mobilefinetuner/visualizer/data/
+
+# The tiny model and tokenized rows are generated locally for the demo.
+/android/app/src/main/assets/tiny_qwen/
+!/android/app/src/test/resources/samples/gpt2_train.log
+!/android/app/src/test/resources/samples/gemma_train.log
+!/android/app/src/test/resources/samples/rss.csv
